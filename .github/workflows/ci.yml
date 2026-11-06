@@ -39,3 +39,18 @@ jobs:
         run: python -m pip install ruff
       - name: Lint
         run: ruff check .
+
+  personal-data:
+    name: personal-data guard
+    runs-on: ubuntu-latest
+    env:
+      # The forbidden patterns are kept out of the repository. The step runs only when the secret exists.
+      PERSONAL_PATTERNS: ${{ secrets.PERSONAL_PATTERNS }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Check for personal data
+        if: env.PERSONAL_PATTERNS != ''
+        run: python scripts/check_personal_data.py

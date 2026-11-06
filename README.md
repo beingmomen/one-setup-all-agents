@@ -2,7 +2,7 @@
 
 **One setup for all your AI coding agents.** A shared agent config for Claude Code, Codex, OpenCode and Antigravity: write your config once, every agent gets the same setup, and any change can be undone with one command.
 
-> **Status: pre-alpha, not usable yet.** This repository currently contains the decisions and the project skeleton only (Phase 0). The commands below exist but report "not implemented yet" and change nothing. Do not install it expecting it to work.
+> **Status: pre-alpha, not usable yet.** The four commands below exist but report "not implemented yet" and change nothing. The repository holds the decisions, the project skeleton and a ported core (Phases 0 to 2) that is not wired to the public commands yet. Do not install it expecting it to work.
 
 ## Why
 

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // JSONC fixture: comments, block comments, trailing commas and "//" inside strings
+  "model": "fake/model", /* inline block comment */
+  "mcp": {
+    "servers": {
+      // remote server: OpenCode uses type "remote"
+      "demo-remote": {
+        "type": "remote",
+        "url": "https://demo-remote.example.test/api/mcp", // a trailing comma follows
+      },
+      "demo-npx": {
+        "type": "local",
+        "command": ["npx.cmd", "--package=@demo/mcp@latest", "demo-npx-mcp"],
+      },
+      "github": {
+        "type": "local",
+        "command": ["npx", "-y", "@modelcontextprotocol/server-github"],
+        "environment": { "GITHUB_PERSONAL_ACCESS_TOKEN": "FAKE-ENV-SECRET-aaa111" },
+      },
+      "bearer-api": {
+        "type": "remote",
+        "url": "https://api.example.test/mcp",
+        "headers": { "Authorization": "Bearer {env:API_TOKEN_ENV}" },
+      },
+      /* playwright exists only here and is switched off */
+      "playwright": {
+        "type": "local",
+        "command": ["npx", "@playwright/mcp@latest"],
+        "disabled": true,
+      },
+      "demo-browser-a": {
+        "type": "local",
+        "command": ["cmd", "/c", "C:\\demo\\scripts\\demo-browser-a-shared.cmd"],
+      },
+      "demo-browser-b": {
+        "type": "local",
+        "command": ["cmd", "/c", "C:\\demo\\scripts\\demo-browser-b-shared.cmd"],
+      },
+    },
+  },
+}

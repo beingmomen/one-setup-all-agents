@@ -44,6 +44,24 @@ def _cmd_undo(args: argparse.Namespace) -> int:
     raise NotImplementedError("`all-agents undo` is not implemented yet (planned for Phase 5).")
 
 
+def _hidden_run(argv: list[str]) -> int:
+    """`all-agents _run ... -- <command>`: the runner that generated MCP entries call."""
+    from ._core import runner
+
+    return runner.main(argv)
+
+
+def _hidden_legacy(argv: list[str]) -> int:
+    """`all-agents _legacy ...`: the ported core's transitional commands (until Phase 5)."""
+    from ._core import legacy_cli
+
+    return legacy_cli.main(argv)
+
+
+# Internal subcommands: not listed in --help and not part of the four public commands.
+HIDDEN: dict[str, Callable[[list[str]], int]] = {"_run": _hidden_run, "_legacy": _hidden_legacy}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROG,
@@ -117,6 +135,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in HIDDEN:
+        return HIDDEN[argv[0]](argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
     func: Callable[[argparse.Namespace], int] | None = getattr(args, "func", None)

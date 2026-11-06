@@ -1,0 +1,11 @@
+#!/bin/sh
+# Pre-commit guard: refuse a commit whose staged files hold a forbidden pattern (see scripts/check_personal_data.py).
+# Enable it once per clone:   git config core.hooksPath scripts/hooks
+# Patterns live in the git-ignored file .personal-patterns (or the PERSONAL_PATTERNS variable), never in the repository.
+root=$(git rev-parse --show-toplevel) || exit 1
+PY=$(command -v python3 || command -v python) || { echo "pre-commit: python not found; guard skipped" >&2; exit 0; }
+if [ ! -f "$root/.personal-patterns" ] && [ -z "$PERSONAL_PATTERNS" ]; then
+    echo "pre-commit: no personal-data patterns configured (.personal-patterns); guard skipped" >&2
+    exit 0
+fi
+exec "$PY" "$root/scripts/check_personal_data.py" --root "$root" --staged

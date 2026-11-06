@@ -33,5 +33,5 @@ A new tool is:
 
 - English only: code, comments, docs and commit messages.
 - Every behavior change comes with a test.
-- No personal data in code, fixtures or docs.
+- No personal data in code, fixtures or docs. `python scripts/check_personal_data.py` checks it against a pattern list you keep in the git-ignored file `.personal-patterns` (one regular expression per line); `git config core.hooksPath scripts/hooks` runs the same check on every commit.
 - A change to a recorded decision needs a new ADR in `docs/decisions/` (a short file: decision, reason, open points).

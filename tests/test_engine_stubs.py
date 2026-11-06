@@ -4,8 +4,7 @@ import unittest
 from pathlib import Path
 
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
-from one_setup_all_agents import paths
-from one_setup_all_agents.engine import apply, atomic, backup, journal, lock, plan, undo
+from one_setup_all_agents.engine import apply, backup, journal, lock, plan, undo
 from one_setup_all_agents.model import Env, Plan
 
 ENV = Env(
@@ -24,7 +23,6 @@ class EngineStubTests(unittest.TestCase):
             lambda: plan.build_plan(ENV, []),
             lambda: plan.render_plan(Plan()),
             lambda: apply.apply_plan(ENV, Plan(), label="x"),
-            lambda: atomic.atomic_write(state / "f", b""),
             lambda: backup.capture(state, "op", state / "f"),
             lambda: backup.restore(state, {}),
             lambda: journal.begin(state, "x"),
@@ -32,9 +30,6 @@ class EngineStubTests(unittest.TestCase):
             lambda: journal.list_operations(state),
             lambda: journal.owned(state),
             lambda: undo.undo(ENV),
-            lambda: paths.config_dir({}, "linux", state),
-            lambda: paths.state_dir({}, "linux", state),
-            lambda: paths.build_env(),
         )
         for call in calls:
             with self.assertRaises(NotImplementedError):

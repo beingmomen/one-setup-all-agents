@@ -18,6 +18,7 @@ The source of truth is a folder of plain files in the config directory (0002). I
 - Instructions: each tool receives the core file, plus its own appendix if one exists. The planner checks the rendered size against the tool's limit (Antigravity has one) and reports an overflow instead of writing.
 - MCP: neutral fields only (`command`, `args`, `url`, and the names of the environment variables the server needs). The adapter translates to each tool's format. Secrets are referenced by variable name; the file never holds a value.
 - Skills: the source of truth for the skills the user wants shared (see 0007).
+- `config.toml` has an optional `[projects]` table (`personal_owners`, `personal_paths`) that tells project scope (v0.2) which repositories are yours; with no configuration every project counts as a team project, the safe default.
 - `config.toml` carries `version = 1` so the format can change later; an unknown version is refused, not guessed.
 - `all-agents init` creates this layout by importing what the tools already contain, after a full safety snapshot (0005).
 - Reading all of this needs only the standard library: TOML via `tomllib`, JSONC via a small reader in the project.

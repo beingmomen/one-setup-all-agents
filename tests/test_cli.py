@@ -57,6 +57,21 @@ class HelpTests(unittest.TestCase):
             self.assertIn("usage:", out)
 
 
+class HiddenCommandTests(unittest.TestCase):
+    def test_internal_commands_are_not_listed_in_help(self):
+        _, out, _ = _run_main(["--help"])
+        self.assertNotIn("_run", out)
+        self.assertNotIn("_legacy", out)
+
+    def test_internal_commands_dispatch(self):
+        code, out, _ = _run_main(["_legacy", "--help"])
+        self.assertEqual(code, 0)
+        self.assertIn("status", out)
+        code, _, err = _run_main(["_run"])
+        self.assertEqual(code, 2)  # usage error from the runner, not "not implemented"
+        self.assertIn("usage", err)
+
+
 class PreAlphaBehaviorTests(unittest.TestCase):
     def test_commands_report_not_implemented_and_change_nothing(self):
         for command in COMMANDS:

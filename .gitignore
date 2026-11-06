@@ -24,3 +24,6 @@ Thumbs.db
 .env
 *.log
 _work/
+
+# Local personal-data patterns (the guard reads them; they must never be committed)
+.personal-patterns

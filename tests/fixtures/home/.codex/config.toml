@@ -1,0 +1,58 @@
+model = "fake-model"
+
+[mcp_servers.node_repl]
+command = 'C:\demo\runtimes\node_repl.exe'
+args = []
+env_vars = ["BROWSER_USE_ACCESS_PIPE_PATH", "CODEX_WINDOWS_REGISTERED_CORE"]
+startup_timeout_sec = 120
+
+[mcp_servers.node_repl.env]
+NODE_REPL_NODE_PATH = 'C:\fake\node.exe'
+CODEX_HOME = 'C:\fake\codex'
+
+# remote server: Codex uses "url" with no command
+[mcp_servers.demo-remote]
+enabled = true
+url = "https://demo-remote.example.test/api/mcp"
+
+[mcp_servers.demo-browser-a]
+command = "cmd"
+args = ["/c", 'C:\demo\scripts\demo-browser-a-shared.cmd']
+enabled = true
+startup_timeout_sec = 120
+
+[mcp_servers.demo-browser-b]
+command = "cmd"
+args = ["/c", 'C:\demo\scripts\demo-browser-b-shared.cmd']
+enabled = true
+startup_timeout_sec = 120
+
+[mcp_servers.demo-npx]
+command = "npx.cmd"
+args = ["--package=@demo/mcp@latest", "demo-npx-mcp"]
+enabled = true
+
+[mcp_servers.demo-npx.env]
+USER_AGENT = "claude-code/FAKE-UA-VALUE"
+PATH = 'C:\fake\bin;%NVM_HOME%;C:\fake\dir0\FAKE-PATH-MARKER;C:\fake\dir1\FAKE-PATH-MARKER;C:\fake\dir2\FAKE-PATH-MARKER;C:\fake\dir3\FAKE-PATH-MARKER;C:\fake\dir4\FAKE-PATH-MARKER;C:\fake\dir5\FAKE-PATH-MARKER;C:\fake\dir6\FAKE-PATH-MARKER;C:\fake\dir7\FAKE-PATH-MARKER;C:\fake\dir8\FAKE-PATH-MARKER;C:\fake\dir9\FAKE-PATH-MARKER;C:\fake\dir10\FAKE-PATH-MARKER;C:\fake\dir11\FAKE-PATH-MARKER;C:\fake\dir12\FAKE-PATH-MARKER;C:\fake\dir13\FAKE-PATH-MARKER;C:\fake\dir14\FAKE-PATH-MARKER;C:\fake\dir15\FAKE-PATH-MARKER;C:\fake\dir16\FAKE-PATH-MARKER;C:\fake\dir17\FAKE-PATH-MARKER;C:\fake\dir18\FAKE-PATH-MARKER;C:\fake\dir19\FAKE-PATH-MARKER;C:\fake\dir20\FAKE-PATH-MARKER;C:\fake\dir21\FAKE-PATH-MARKER;C:\fake\dir22\FAKE-PATH-MARKER;C:\fake\dir23\FAKE-PATH-MARKER;C:\fake\dir24\FAKE-PATH-MARKER;C:\fake\dir25\FAKE-PATH-MARKER;C:\fake\dir26\FAKE-PATH-MARKER;C:\fake\dir27\FAKE-PATH-MARKER;C:\fake\dir28\FAKE-PATH-MARKER;C:\fake\dir29\FAKE-PATH-MARKER;C:\fake\dir30\FAKE-PATH-MARKER;C:\fake\dir31\FAKE-PATH-MARKER;C:\fake\dir32\FAKE-PATH-MARKER;C:\fake\dir33\FAKE-PATH-MARKER;C:\fake\dir34\FAKE-PATH-MARKER;C:\fake\dir35\FAKE-PATH-MARKER;C:\fake\dir36\FAKE-PATH-MARKER;C:\fake\dir37\FAKE-PATH-MARKER;C:\fake\dir38\FAKE-PATH-MARKER;C:\fake\dir39\FAKE-PATH-MARKER;C:\fake\dir40\FAKE-PATH-MARKER;C:\fake\dir41\FAKE-PATH-MARKER;C:\fake\dir42\FAKE-PATH-MARKER;C:\fake\dir43\FAKE-PATH-MARKER;C:\fake\dir44\FAKE-PATH-MARKER;C:\fake\dir45\FAKE-PATH-MARKER;C:\fake\dir46\FAKE-PATH-MARKER;C:\fake\dir47\FAKE-PATH-MARKER;C:\fake\dir48\FAKE-PATH-MARKER;C:\fake\dir49\FAKE-PATH-MARKER;C:\fake\dir50\FAKE-PATH-MARKER;C:\fake\dir51\FAKE-PATH-MARKER;C:\fake\dir52\FAKE-PATH-MARKER;C:\fake\dir53\FAKE-PATH-MARKER;C:\fake\dir54\FAKE-PATH-MARKER;C:\fake\dir55\FAKE-PATH-MARKER;C:\fake\dir56\FAKE-PATH-MARKER;C:\fake\dir57\FAKE-PATH-MARKER;C:\fake\dir58\FAKE-PATH-MARKER;C:\fake\dir59\FAKE-PATH-MARKER'
+
+[mcp_servers.github]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+enabled = true
+
+[mcp_servers.github.env]
+GITHUB_PERSONAL_ACCESS_TOKEN = "FAKE-ENV-SECRET-aaa111"
+
+[mcp_servers.bearer-api]
+url = "https://api.example.test/mcp"
+bearer_token_env_var = "API_TOKEN_ENV"
+
+[mcp_servers.literal-header]
+url = "https://literal.example.test/mcp"
+
+[mcp_servers.literal-header.http_headers]
+Authorization = "Bearer FAKE-HEADER-SECRET-ddd444"
+
+[projects.'C:\fake\project']
+trust_level = "trusted"
