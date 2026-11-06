@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "one-setup-all-agents"
+dynamic = ["version"]
+description = "One setup for all your AI coding agents: a shared agent config for Claude Code, Codex, OpenCode and Antigravity, with one-command undo."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Abdelmomen Elshatory" }]
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = [
+    "shared agent config",
+    "ai-agents",
+    "claude-code",
+    "codex",
+    "opencode",
+    "antigravity",
+    "mcp",
+    "agent-skills",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Utilities",
+]
+# The core has no runtime dependencies (stdlib only). See docs/decisions/0004.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/beingmomen/one-setup-all-agents"
+Repository = "https://github.com/beingmomen/one-setup-all-agents"
+Issues = "https://github.com/beingmomen/one-setup-all-agents/issues"
+
+[project.scripts]
+all-agents = "one_setup_all_agents.cli:main"
+# Alias so that `uvx one-setup-all-agents` works (uvx runs the command named like the package).
+one-setup-all-agents = "one_setup_all_agents.cli:main"
+
+[tool.hatch.version]
+path = "src/one_setup_all_agents/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/one_setup_all_agents"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
