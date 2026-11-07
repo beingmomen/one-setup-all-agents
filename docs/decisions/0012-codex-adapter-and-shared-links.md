@@ -1,6 +1,6 @@
 # 0012: Codex adapter and shared skill links
 
-Status: Proposed
+Status: Accepted (the maintainer accepted the recommendation on each open point below)
 
 This records the choices made while porting the Codex adapter (`adapters/codex.py`) and while fixing a bug in how the engine merges skill links that two tools share. It changes no rule of 0005 to 0011. Where it settles an open point of an accepted ADR, it says so. Facts marked [docs] come from the Codex source and documentation (read through the `context7` index of the `openai/codex` repository), [prototype] from the legacy implementation this project grew out of (ported in `_core/`), and [unverified] were not checked against a live tool.
 
@@ -62,7 +62,7 @@ After the normal merge, a removal that is left over is replaced when some OTHER 
 
 ## Open points
 
-- **`AGENTS.override.md` is a permanent `Conflict`** while the file exists and is not empty. Alternative: only warn in `detect()`. Chosen because the desired state is not in effect, and `sync` should not say "nothing to do". Needs the maintainer's confirmation.
+- **`AGENTS.override.md` is a permanent `Conflict`** while the file exists and is not empty. Alternative: only warn in `detect()`. Chosen because the desired state is not in effect, and `sync` should not say "nothing to do". Confirmed by the maintainer.
 - **`.cmd` on Windows** is applied by the plan decision although Codex resolves `PATHEXT` itself. Alternative: plain names, like Claude Code. Needs a live check on Windows.
 - **A changed owned table is rewritten whole inside the managed region**, so comments inside it are lost and it moves. A finer in-place edit of one table would need a new function in `toml_edit.py`; not built.
 - **Nested tables below an owned server** (`[mcp_servers.<n>.tools.<tool>]`) make an update a `Conflict` (the legacy renderer handles one level only). A server that is only added or left alone is unaffected.

@@ -18,7 +18,6 @@ from codex_support import FIXTURE, seed_codex_home
 from engine_support import can_make_dir_link
 from one_setup_all_agents._core import toml_edit
 from one_setup_all_agents.adapters import get_adapter
-from one_setup_all_agents.adapters._stub import StubAdapter
 from one_setup_all_agents.adapters.codex import (
     CodexAdapter,
     ConfigUnreadable,
@@ -117,7 +116,7 @@ class Base(unittest.TestCase):
 class RegistryTests(unittest.TestCase):
     def test_codex_is_a_real_adapter(self):
         adapter = get_adapter("codex")
-        self.assertNotIsInstance(adapter, StubAdapter)
+        self.assertIsInstance(adapter, CodexAdapter)
         self.assertEqual(adapter.capabilities, {Kind.INSTRUCTIONS, Kind.MCP, Kind.SKILLS})
 
 

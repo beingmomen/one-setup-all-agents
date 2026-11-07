@@ -4,9 +4,8 @@
    `example-cli`, not registered) pass the whole suite: the suite can be satisfied.
 2. Deliberately broken adapters each fail the check that is meant to catch them: a contract that
    cannot fail proves nothing.
-3. Every registered adapter gets a test class. A `StubAdapter` shows up as a visible skip that
-   names it; the moment an adapter stops being a stub it runs the full suite, with no edit here
-   (an optional seed function for its fake home goes in `REGISTERED_SEEDS`).
+3. Every registered adapter gets a test class that runs the full suite, with no edit here (an
+   optional seed function for its fake home goes in `REGISTERED_SEEDS`).
 
 Ops are applied and undone by the REAL engine (see tests/contract_applier.py), so a pass here
 exercises the undo guarantee of docs/decisions/0005; docs/decisions/0010 says exactly what that
@@ -23,6 +22,8 @@ from pathlib import Path
 
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
 from adapter_contract import AdapterContract, Harness, is_under
+from antigravity_support import contract_namespace as antigravity_namespace
+from antigravity_support import seed_antigravity_home
 from claude_support import contract_namespace as claude_namespace
 from claude_support import seed_claude_home
 from codex_support import seed_codex_home
@@ -33,7 +34,6 @@ from example_adapter import (
     seed_example_home,
 )
 from one_setup_all_agents.adapters import ADAPTERS
-from one_setup_all_agents.adapters._stub import StubAdapter
 from one_setup_all_agents.model import (
     INSTRUCTIONS_KEY,
     Conflict,
@@ -88,6 +88,7 @@ class ExampleSpecificTests(unittest.TestCase):
     # the hooks `Harness` asks its test case for
     make_env = AdapterContract.make_env
     unwritten_mcp = AdapterContract.unwritten_mcp
+    removable_mcp = AdapterContract.removable_mcp
 
     def make_adapter(self):
         return ExampleAdapter()
@@ -474,25 +475,17 @@ REGISTERED_SEEDS = {
     "opencode": seed_opencode_home,
     "claude": seed_claude_home,
     "codex": seed_codex_home,
+    "agy": seed_antigravity_home,
 }
 
 #: Optional: adapter id -> function() returning extra members for its contract class (the hooks
 #: `make_env` and `make_cli` of `AdapterContract`). Needed by an adapter that plans `RunCli` ops.
-REGISTERED_EXTRAS = {"claude": claude_namespace}
+REGISTERED_EXTRAS = {"claude": claude_namespace, "agy": antigravity_namespace}
 
 
 def contract_case_for(adapter_cls):
-    """A test class for one registered adapter: a visible skip for a stub, else the full suite."""
+    """A test class for one registered adapter: the full contract suite."""
     name = f"Contract_{adapter_cls.__name__}"
-    if issubclass(adapter_cls, StubAdapter):
-
-        def test_contract(self):
-            self.skipTest(
-                f"adapter '{adapter_cls.id}' is still a StubAdapter: the contract suite starts "
-                "running when it is ported"
-            )
-
-        return type(name, (unittest.TestCase,), {"test_contract": test_contract})
     seed = REGISTERED_SEEDS.get(adapter_cls.id)
     namespace = {
         "make_adapter": lambda self: adapter_cls(),
@@ -516,14 +509,10 @@ class RegistryCoverageTests(unittest.TestCase):
         for cls in ADAPTERS:
             self.assertIn(f"Contract_{cls.__name__}", globals(), cls.id)
 
-    def test_a_non_stub_adapter_gets_the_full_suite_and_a_stub_a_skip(self):
+    def test_every_registered_adapter_gets_the_full_suite(self):
+        for cls in ADAPTERS:
+            self.assertTrue(issubclass(globals()[f"Contract_{cls.__name__}"], AdapterContract))
         self.assertTrue(issubclass(contract_case_for(ExampleAdapter), AdapterContract))
-        stub = contract_case_for(type("DemoStub", (StubAdapter,), {"id": "demo-stub"}))
-        self.assertFalse(issubclass(stub, AdapterContract))
-        result = unittest.TestResult()
-        stub("test_contract").run(result)
-        self.assertEqual(len(result.skipped), 1)
-        self.assertIn("demo-stub", result.skipped[0][1])
 
     def test_the_helpers_use_a_temporary_home_only(self):
         case = ExampleSpecificTests("test_normalize_mcp_drops_exactly_what_the_format_cannot_store")

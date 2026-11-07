@@ -207,8 +207,8 @@ class Harness:
         return Desired(d.instructions + "More.\n", mcp, list(d.skills), d.unwritten)
 
     def reduced(self, d: Desired) -> Desired:
-        """The same state with one MCP server and one skill gone."""
-        mcp = {k: v for k, v in d.mcp.items() if k != "demo-remote"}
+        """The same state with one MCP server (`removable_mcp`) and one skill gone."""
+        mcp = {k: v for k, v in d.mcp.items() if k != self.case.removable_mcp()}
         skills = [s for s in d.skills if s.name != "demo-skill-b"]
         return Desired(d.instructions, mcp, skills, d.unwritten)
 
@@ -277,6 +277,11 @@ class AdapterContract:
         They must be absent from `normalize_mcp`, from the claims and from `owned`; nothing else
         may be dropped."""
         return frozenset()
+
+    def removable_mcp(self) -> str:
+        """The harness server that `reduced` removes. It must be one the adapter writes (and so
+        owns): the default is `demo-remote`; an adapter that cannot write that one names another."""
+        return "demo-remote"
 
     def make_cli(self, env: Env) -> Callable | None:
         """A fake for the adapter's CLI if it plans `RunCli` ops; it must never run a program."""
@@ -537,9 +542,10 @@ class AdapterContract:
                     for ref in op.releases:
                         released[ref.kind].add(ref.key)
                 if Kind.MCP in self.caps(h):
-                    self.assertNotIn("demo-remote", a.read_mcp(h.env, Scope.GLOBAL))
-                    self.assertEqual(released[Kind.MCP], {"demo-remote"})
-                    self.assertNotIn("demo-remote", h.owned[Kind.MCP])
+                    gone = self.removable_mcp()
+                    self.assertNotIn(gone, a.read_mcp(h.env, Scope.GLOBAL))
+                    self.assertEqual(released[Kind.MCP], {gone})
+                    self.assertNotIn(gone, h.owned[Kind.MCP])
                 if Kind.SKILLS in self.caps(h):
                     names = {s.name for s in a.read_skills(h.env, Scope.GLOBAL)}
                     self.assertNotIn("demo-skill-b", names)

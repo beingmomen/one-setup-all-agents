@@ -421,6 +421,36 @@ class RealToolsSharedSkillsTests(PlanCase):
         self.assertEqual(self.owners(), {"opencode": set(), "codex": {"demo-skill-a"}})
         self.assertTrue(self.plan([], [self.skill_a]).is_empty)
 
+    def test_agy_lists_its_skills_in_a_manifest_and_leaves_the_shared_links_alone(self):
+        from one_setup_all_agents.adapters.antigravity import AntigravityAdapter
+
+        adapters = [*self.adapters, AntigravityAdapter()]
+        both = [self.skill_a, self.skill_b]
+        desired = {t: DesiredState(skills=both) for t in ("opencode", "codex", "agy")}
+        plan = build_plan(self.env, adapters, desired)
+        links = [op for op in plan.executable if isinstance(op, Link)]
+        edits = [op for op in plan.executable if isinstance(op, EditFile)]
+        self.assertEqual(
+            {op.link for op in links}, {self.shared / "demo-skill-a", self.shared / "demo-skill-b"}
+        )
+        self.assertEqual([op.path.name for op in edits], ["skills.json"])
+        self.assertEqual(edits[0].path.parent, self.home / ".gemini" / "config")
+        apply_plan(self.env, plan, label="all three")
+        self.assertEqual(
+            journal.owned_for(self.state, "agy", "skills"), {"demo-skill-a", "demo-skill-b"}
+        )
+
+        # OpenCode and agy drop b; Codex keeps it: the shared link stays, agy's entry goes
+        later = dict(desired)
+        later["opencode"] = later["agy"] = DesiredState(skills=[self.skill_a])
+        plan = build_plan(self.env, adapters, later)
+        kinds = sorted(type(op).__name__ for op in plan.executable)
+        self.assertEqual(kinds, ["EditFile", "Link"])
+        apply_plan(self.env, plan, label="drop b")
+        self.assertTrue((self.shared / "demo-skill-b" / "SKILL.md").is_file())
+        self.assertEqual(journal.owned_for(self.state, "agy", "skills"), {"demo-skill-a"})
+        self.assertTrue(build_plan(self.env, adapters, later).is_empty)
+
 
 class RenderTests(PlanCase):
     SECRETS = ["FAKE-ENV-SECRET-aaa111", "FAKE-ARG-SECRET-bbb222", "FAKE-URL-SECRET-ccc333"]

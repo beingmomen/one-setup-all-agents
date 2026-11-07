@@ -16,7 +16,6 @@ import contract_applier
 from engine_support import can_make_dir_link
 from one_setup_all_agents._core import jsonc
 from one_setup_all_agents.adapters import get_adapter
-from one_setup_all_agents.adapters._stub import StubAdapter
 from one_setup_all_agents.adapters.opencode import (
     ConfigUnreadable,
     OpenCodeAdapter,
@@ -112,9 +111,10 @@ class Base(unittest.TestCase):
 
 
 class RegistryTests(unittest.TestCase):
-    def test_opencode_is_a_real_adapter_and_only_agy_is_still_a_stub(self):
-        self.assertNotIsInstance(get_adapter("opencode"), StubAdapter)
-        self.assertIsInstance(get_adapter("agy"), StubAdapter)
+    def test_opencode_is_registered_with_the_three_v01_kinds(self):
+        adapter = get_adapter("opencode")
+        self.assertIsInstance(adapter, OpenCodeAdapter)
+        self.assertEqual(adapter.capabilities, {Kind.INSTRUCTIONS, Kind.MCP, Kind.SKILLS})
 
 
 # -- paths ---------------------------------------------------------------------------------------

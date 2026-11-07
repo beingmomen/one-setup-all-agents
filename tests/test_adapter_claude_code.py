@@ -24,7 +24,6 @@ from claude_support import (
     seed_claude_home,
 )
 from one_setup_all_agents.adapters import get_adapter
-from one_setup_all_agents.adapters._stub import StubAdapter
 from one_setup_all_agents.adapters.claude_code import (
     BIN_ENV,
     ClaudeCodeAdapter,
@@ -127,9 +126,10 @@ class Base(unittest.TestCase):
 
 
 class RegistryTests(unittest.TestCase):
-    def test_claude_is_a_real_adapter_and_only_agy_is_still_a_stub(self):
-        self.assertNotIsInstance(get_adapter("claude"), StubAdapter)
-        self.assertIsInstance(get_adapter("agy"), StubAdapter)
+    def test_claude_is_registered_with_the_three_v01_kinds(self):
+        adapter = get_adapter("claude")
+        self.assertIsInstance(adapter, ClaudeCodeAdapter)
+        self.assertEqual(adapter.capabilities, {Kind.INSTRUCTIONS, Kind.MCP, Kind.SKILLS})
 
 
 # -- paths ---------------------------------------------------------------------------------------

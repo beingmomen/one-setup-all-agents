@@ -1,0 +1,17 @@
+{
+  // The user's own Antigravity MCP config: comments, other top-level keys, two servers of their own.
+  "theme": "demo", /* inline block comment */
+  "mcpServers": {
+    // the user's own remote server; its keys are not ours
+    "user-remote": {
+      "serverUrl": "https://user.example.test/mcp", // keep this comment
+      "headers": { "X-Demo": "literal-demo-header" }
+    },
+    /* the user's own local server with a literal value that must never be read */
+    "user-local": {
+      "command": "user-cmd",
+      "args": ["--serve"],
+      "env": { "USER_TOKEN": "FAKE-ENV-SECRET-aaa111", "USER_MODE": "demo" }
+    }
+  }
+}

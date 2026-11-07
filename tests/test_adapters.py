@@ -1,13 +1,14 @@
 """The adapter registry and base interface (Phase 0 skeleton)."""
 
+import importlib.util
+import inspect
 import unittest
 from pathlib import Path
 
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
 from one_setup_all_agents.adapters import ADAPTERS, all_adapters, get_adapter
-from one_setup_all_agents.adapters._stub import StubAdapter
 from one_setup_all_agents.adapters.base import ToolAdapter
-from one_setup_all_agents.model import Env, Kind, Scope, Unsupported
+from one_setup_all_agents.model import Detection, Env, Kind, Paths, Scope, Unsupported
 
 
 def _env():
@@ -43,29 +44,7 @@ class RegistryTests(unittest.TestCase):
             self.assertEqual(set(adapter.capabilities), v01, adapter.id)
 
 
-class StubBehaviorTests(unittest.TestCase):
-    def test_required_methods_raise_clear_not_implemented(self):
-        env = _env()
-        for adapter in all_adapters():
-            if not isinstance(adapter, StubAdapter):
-                continue  # ported adapters are covered by their own test module and the contract suite
-            calls = (
-                lambda a=adapter: a.detect(env),
-                lambda a=adapter: a.paths(env, Scope.GLOBAL),
-                lambda a=adapter: a.read_instructions(env, Scope.GLOBAL),
-                lambda a=adapter: a.read_mcp(env, Scope.GLOBAL),
-                lambda a=adapter: a.read_skills(env, Scope.GLOBAL),
-                lambda a=adapter: a.plan_instructions(env, Scope.GLOBAL, "", frozenset()),
-                lambda a=adapter: a.plan_mcp(env, Scope.GLOBAL, {}, frozenset()),
-                lambda a=adapter: a.plan_skills(env, Scope.GLOBAL, [], frozenset()),
-            )
-            for call in calls:
-                with self.assertRaises(NotImplementedError) as ctx:
-                    call()
-                message = str(ctx.exception)
-                self.assertIn(adapter.label, message)
-                self.assertIn("not implemented yet", message)
-
+class OptionalKindsTests(unittest.TestCase):
     def test_optional_kinds_default_to_unsupported_not_silence(self):
         env = _env()
         for tool in ("opencode", "claude", "codex", "agy"):
@@ -76,9 +55,56 @@ class StubBehaviorTests(unittest.TestCase):
                 self.assertIsInstance(ops[0], Unsupported)
                 self.assertEqual(ops[0].tool, tool)
 
-    def test_only_antigravity_is_still_a_stub(self):
-        stubs = [a.id for a in all_adapters() if isinstance(a, StubAdapter)]
-        self.assertEqual(stubs, ["agy"])
+    def test_the_base_class_defaults_report_the_optional_kinds_directly(self):
+        class Bare(ToolAdapter):
+            id = "bare"
+            label = "Bare"
+            capabilities = frozenset()
+
+            def detect(self, env):
+                return Detection(installed=False)
+
+            def paths(self, env, scope):
+                return Paths()
+
+            def read_instructions(self, env, scope):
+                return None
+
+            def read_mcp(self, env, scope):
+                return {}
+
+            def read_skills(self, env, scope):
+                return []
+
+            def plan_instructions(self, env, scope, desired, owned):
+                return []
+
+            def plan_mcp(self, env, scope, desired, owned):
+                return []
+
+            def plan_skills(self, env, scope, desired, owned):
+                return []
+
+        adapter = Bare()
+        for kind, plan in (
+            (Kind.HOOKS, adapter.plan_hooks),
+            (Kind.PERMISSIONS, adapter.plan_permissions),
+            (Kind.MEMORY, adapter.plan_memory),
+        ):
+            (op,) = plan(_env(), Scope.GLOBAL, None, frozenset())
+            self.assertEqual((type(op), op.tool, op.kind), (Unsupported, "bare", kind))
+        self.assertEqual(adapter.normalize_mcp({}), {})
+        self.assertEqual(adapter.normalize_instructions("x"), "x")
+        self.assertEqual(adapter.notes(), [])
+        self.assertEqual(adapter.wanted_links(_env(), Scope.GLOBAL, []), [])
+
+
+class NoStubsTests(unittest.TestCase):
+    def test_the_stub_module_is_gone_and_every_adapter_implements_the_interface(self):
+        self.assertIsNone(importlib.util.find_spec("one_setup_all_agents.adapters._stub"))
+        for cls in ADAPTERS:
+            self.assertFalse(cls.__abstractmethods__, cls.id)
+            self.assertNotIn("NotImplementedError", inspect.getsource(cls), cls.id)
 
 
 if __name__ == "__main__":

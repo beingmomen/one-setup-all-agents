@@ -40,7 +40,7 @@ pipx install one-setup-all-agents    # then run: all-agents --help
 | Claude Code | `claude` | planned | not yet verified | unverified | unverified | MCP is written through the tool's own CLI, because running sessions also write its config file. |
 | Codex | `codex` | planned | not yet verified | unverified | unverified | Only a managed region of its TOML config is edited. |
 | OpenCode | `opencode` | planned | not yet verified | unverified | unverified | First adapter to be ported (simplest). |
-| Antigravity (`agy`) | `agy` | planned | not yet verified | unverified | unverified | Does not follow Windows junctions, so skills use a copy plus manifest there. |
+| Antigravity (`agy`) | `agy` | planned | not yet verified | unverified | unverified | Does not follow Windows junctions, so each skill is listed in its `skills.json` manifest by the path of the source folder. Has no variable reference for secrets, so an http server with headers is not written. |
 
 Nothing is implemented yet, so no cell says "verified". When the adapters exist, verification follows this plan: Windows and Linux (through WSL) are checked with the real tools; macOS is checked only through CI runners for what runs without a login (tests against fixtures). Anything not checked stays marked "unverified" here.
 
