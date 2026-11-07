@@ -16,4 +16,4 @@ Short ADRs. Each one gives the decision, the reason and the open points. Status 
 | [0010](0010-engine-v1.md) | Engine v1 | Accepted |
 | [0011](0011-claude-code-adapter.md) | Claude Code adapter | Accepted |
 | [0012](0012-codex-adapter-and-shared-links.md) | Codex adapter and shared skill links | Accepted |
-| [0013](0013-antigravity-adapter.md) | Antigravity adapter | Proposed |
+| [0013](0013-antigravity-adapter.md) | Antigravity adapter | Accepted |

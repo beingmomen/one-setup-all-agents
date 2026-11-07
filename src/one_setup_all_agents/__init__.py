@@ -1,6 +1,6 @@
 """one-setup-all-agents: one setup for all your AI coding agents.
 
-A shared agent config for Claude Code, Codex, OpenCode and Antigravity.
+A shared agent config for every supported tool (the registry in `adapters/` lists them).
 Write your config once, every agent gets the same setup, and any change can be
 undone with one command.
 

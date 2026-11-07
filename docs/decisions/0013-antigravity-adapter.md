@@ -1,8 +1,8 @@
 # 0013: Antigravity adapter
 
-Status: Proposed
+Status: Accepted (the maintainer accepted the recommendation on each open point below)
 
-This records the choices made while porting the Antigravity adapter (`adapters/antigravity.py`, id `agy`, the tool's command is `agy`). It changes no rule of 0005 to 0012, but it refines one line of 0007 (the Antigravity skills method); the maintainer's confirmation is needed for that. Facts marked [docs] come from the official Antigravity documentation (`antigravity.google/docs`: rules, mcp, skills, customization-discovery, read on 2026-11-07), [prototype] from the legacy implementation this project grew out of (ported in `_core/`, live-tested on Windows with `agy` 1.4.x), and [unverified] were not checked against a live tool.
+This records the choices made while porting the Antigravity adapter (`adapters/antigravity.py`, id `agy`, the tool's command is `agy`). It changes no rule of 0005 to 0012, but it refines one line of 0007 (the Antigravity skills method); the maintainer confirmed that refinement. Facts marked [docs] come from the official Antigravity documentation (`antigravity.google/docs`: rules, mcp, skills, customization-discovery, read on 2026-11-07), [prototype] from the legacy implementation this project grew out of (ported in `_core/`, live-tested on Windows with `agy` 1.4.x), and [unverified] were not checked against a live tool.
 
 ## Decision
 

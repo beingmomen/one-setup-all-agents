@@ -20,7 +20,7 @@ Fallback order when a link cannot be created or a tool does not follow links:
 
 Per tool:
 
-- **Antigravity**: does not follow Windows junctions (known), so on Windows it uses copy plus manifest. On Linux and macOS it also uses copy plus manifest until symlink-following is verified (unverified; this is the safe default, not a finding).
+- **Antigravity** (refined by 0013: one `skills.json` entry per skill, pointing at the source folder, with no link and no copy, on every OS): does not follow Windows junctions (known), so on Windows it uses copy plus manifest. On Linux and macOS it also uses copy plus manifest until symlink-following is verified (unverified; this is the safe default, not a finding).
 - **Claude Code, Codex, OpenCode**: link in each tool's skills directory. Tools that read the shared agents skills directory are linked there once; the engine de-duplicates link targets across adapters.
 
 Rules that make it safe:

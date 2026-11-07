@@ -12,7 +12,7 @@ from .claude_code import ClaudeCodeAdapter
 from .codex import CodexAdapter
 from .opencode import OpenCodeAdapter
 
-#: Registry in porting order: OpenCode first (simplest), Antigravity last (most specific).
+#: Registry in porting order: the simplest tool first, the most specific last.
 ADAPTERS: tuple[type[ToolAdapter], ...] = (
     OpenCodeAdapter,
     ClaudeCodeAdapter,

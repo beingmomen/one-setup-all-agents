@@ -145,7 +145,7 @@ class McpServer:
     cwd: str | None = None  # stdio only
     auth: str | None = None  # None, "oauth" or "none"; documentation, no tool needs a key for it
     enabled: bool = True
-    startup_timeout_sec: int | None = None  # only some tools (Codex) can express it
+    startup_timeout_sec: int | None = None  # only some tools can express it
 
     def __post_init__(self) -> None:
         pairs = self.env.items() if isinstance(self.env, Mapping) else self.env
@@ -218,7 +218,7 @@ class EditFile:
 
 @dataclass(frozen=True)
 class RunCli:
-    """Run a tool's own CLI because the tool owns the file (for example MCP via `claude mcp`).
+    """Run a tool's own CLI because the tool owns the file (for example to edit its MCP list).
 
     `inverse_argv` is required: undo runs it. An op without an inverse is not allowed.
     """
