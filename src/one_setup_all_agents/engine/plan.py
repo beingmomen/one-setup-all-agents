@@ -16,6 +16,7 @@ import os
 import shlex
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 from .._core.mask import ENV_REF, MASK, SECRET_NAME, mask_args, mask_text
 from ..adapters.base import ToolAdapter
@@ -33,8 +34,10 @@ from ..model import (
     Scope,
     SkillRef,
     Unsupported,
+    WantedLink,
 )
-from . import fsops, journal
+from . import backup, fsops, journal
+from .errors import BackupError
 
 
 @dataclass(frozen=True)
@@ -109,6 +112,7 @@ def build_plan(
     """
     wanted = tuple(kinds) if kinds is not None else KIND_ORDER
     ops: list[Op] = []
+    wanted_links: dict[str, list[WantedLink]] = {}
     for adapter in adapters:
         if isinstance(desired, Mapping):
             state = desired.get(adapter.id, DesiredState())
@@ -121,7 +125,10 @@ def build_plan(
                 continue
             owned = journal.owned_for(env.state_dir, adapter.id, kind.value)
             ops.extend(_plan_kind(adapter, env, scope, kind, state, owned))
-    return Plan(merge_links(ops))
+            if kind is Kind.SKILLS:
+                for want in adapter.wanted_links(env, scope, state.skills):
+                    wanted_links.setdefault(_norm(want.link), []).append(want)
+    return Plan(merge_links(ops, wanted_links))
 
 
 # -- merging identical links across adapters (docs/decisions/0007) ------------------------------
@@ -139,7 +146,54 @@ def _first_ref(op: Link) -> ItemRef | None:
     return next(iter(op.claims + op.releases), None)
 
 
-def merge_links(ops: list[Op]) -> list[Op]:
+def _in_wanted_state(link: Path, target: Path) -> bool:
+    """Is `link` a link (or an unedited marked copy) that already gives what `target` wants?"""
+    try:
+        current = backup.describe(link)
+    except (BackupError, OSError):
+        return False
+    if current["state"] == "dir_link":
+        return fsops.same_target(current["target"], target)
+    if current["state"] == "copy_tree":
+        return current["tree_sha256"] == current["marker"]["tree_sha256"] and fsops.same_target(
+            current["marker"]["source"], target
+        )
+    return False
+
+
+def _keep_if_still_wanted(removal: Link, wanting: Sequence[WantedLink]) -> Link:
+    """A removal of a link that another tool still wants, as it is, becomes a release-only op.
+
+    The op is a `Link` to the target the other tool wants; the path is already in that state, so
+    the engine changes nothing on disk (docs/decisions/0010, "already as wanted") but journals the
+    op, which moves the ownership: the withdrawing tool's `releases` and the remaining tools'
+    `claims` (docs/decisions/0012). Nothing changes when no other tool wants the path, or the path
+    is not in the state it wants (that tool then plans its own relink, which `merge_links` keeps).
+    """
+    leaving = {ref.tool for ref in removal.releases}
+    keepers = [
+        w
+        for w in wanting
+        if w.ref.tool not in leaving
+        and _norm(w.link) == _norm(removal.link)
+        and _in_wanted_state(removal.link, w.target)
+    ]
+    if not keepers:
+        return removal
+    tools = ", ".join(sorted({w.ref.tool for w in keepers}))
+    return Link(
+        link=removal.link,
+        target=keepers[0].target,
+        description=f"keep the shared link, still wanted by {tools} ({removal.description})",
+        allow_copy_fallback=all(w.allow_copy_fallback for w in keepers),
+        claims=tuple(dict.fromkeys(w.ref for w in keepers)),
+        releases=removal.releases,
+    )
+
+
+def merge_links(
+    ops: list[Op], wanted_links: Mapping[str, Sequence[WantedLink]] | None = None
+) -> list[Op]:
     """Collapse `Link` ops that name the same link path, so a shared folder is linked once.
 
     - Same target (or both removals): one op, claims and releases of all adapters joined, so the
@@ -147,6 +201,11 @@ def merge_links(ops: list[Op]) -> list[Op]:
     - One removes, one links: the link is kept (another tool still wants it); the removal's
       `releases` are added to the kept op so the withdrawing tool stops owning the item.
     - Different targets: the first stays, the later one becomes a `Conflict` and is not run.
+    - `wanted_links` (normalized link path -> what the adapters want there, op or no op): a removal
+      that is left over after merging is dropped when another tool still wants that path and the
+      path is already as that tool wants it. The removal's `releases` stay (the withdrawing tool
+      stops owning the item) and the other tools claim it (`_keep_if_still_wanted`). This is the
+      case the first rule cannot see: the other tool plans nothing because nothing is to be done.
     """
     out: list[Op] = []
     at: dict[str, int] = {}
@@ -188,6 +247,13 @@ def merge_links(ops: list[Op]) -> list[Op]:
                 path=op.link,
             )
         )
+    if wanted_links:
+        out = [
+            _keep_if_still_wanted(op, wanted_links.get(_norm(op.link), ()))
+            if isinstance(op, Link) and op.target is None
+            else op
+            for op in out
+        ]
     return out
 
 

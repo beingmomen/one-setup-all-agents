@@ -4,7 +4,7 @@ Everything here is a pure planner or reader: nothing writes (docs/decisions/0008
 
 - the whole-file ownership rule for a tool's global instructions file;
 - the per-skill link planner and the skills-directory reader (docs/decisions/0007);
-- two small helpers (`sha256_hex`, `is_absolute`).
+- small helpers (`sha256_hex`, `is_absolute`, `decode_text` / `encode_text` for a text config).
 
 Anything that depends on a tool's own format stays in that tool's module.
 """
@@ -34,6 +34,19 @@ from ..model import (
 
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def decode_text(raw: bytes) -> tuple[str, bool, bool]:
+    """(text with LF newlines, had a BOM, used CRLF). For editing a text config file in place."""
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    body = raw[3:] if bom else raw
+    return body.decode("utf-8").replace("\r\n", "\n"), bom, b"\r\n" in body
+
+
+def encode_text(text: str, bom: bool, crlf: bool) -> bytes:
+    """The inverse of `decode_text`: restores the BOM and the CRLF line endings."""
+    out = text.replace("\n", "\r\n") if crlf else text
+    return (b"\xef\xbb\xbf" if bom else b"") + out.encode("utf-8")
 
 
 def is_absolute(value: str, platform: str) -> bool:

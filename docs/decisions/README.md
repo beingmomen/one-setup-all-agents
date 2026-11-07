@@ -14,4 +14,5 @@ Short ADRs. Each one gives the decision, the reason and the open points. Status 
 | [0008](0008-adapter-engine-boundary.md) | Adapter and engine boundary | Accepted |
 | [0009](0009-adapter-interface-v1.md) | Adapter interface v1 | Accepted |
 | [0010](0010-engine-v1.md) | Engine v1 | Accepted |
-| [0011](0011-claude-code-adapter.md) | Claude Code adapter | Proposed |
+| [0011](0011-claude-code-adapter.md) | Claude Code adapter | Accepted |
+| [0012](0012-codex-adapter-and-shared-links.md) | Codex adapter and shared skill links | Proposed |

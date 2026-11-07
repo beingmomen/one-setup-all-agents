@@ -57,12 +57,16 @@ an entry with a `url` and no `type` is a configuration error in Claude Code. Key
 entry that this adapter does not own (`oauth`, `headersHelper`, ...) survive a change.
 
 What Claude Code cannot store is reported as `Unsupported` (never dropped silently): `cwd` (not a
-documented key), `startup_timeout_sec` (only the global `MCP_TIMEOUT`), `enabled = false` (there is
-no per-server switch in the user scope; the server is written ENABLED and the plan says so), and
-for an http server `command`, `args`, `env`, `env_vars`, `cwd`. `auth` is documentation only
-(OAuth is on by default) and is not written. `normalize_mcp` says exactly which fields do not
-survive a round trip. An `sse` or `streamable-http` entry is read as http; a `ws` entry is not
-representable and is not read.
+documented key), `startup_timeout_sec` (only the global `MCP_TIMEOUT`), and for an http server
+`command`, `args`, `env`, `env_vars`, `cwd`. `auth` is documentation only (OAuth is on by default)
+and is not written. `normalize_mcp` says exactly which fields do not survive a round trip. An
+`sse` or `streamable-http` entry is read as http; a `ws` entry is not representable and is not
+read.
+
+A server with `enabled = false` is not written at all: the user scope has no per-server switch, and
+writing it would turn on a server the source disables. It is treated as "should not be present":
+absent means nothing is planned, an owned entry is removed (the normal remove path), an entry that
+is not owned is left alone, and one `Unsupported` line names the server.
 
 Windows launchers (`npx`, `npm`, `pnpm`, `yarn`): written as plain names, never `.cmd`. The
 prototype did this against the live tool, and the Claude Code changelog removed its "requires a
@@ -302,8 +306,6 @@ def _lost_fields(server: McpServer) -> list[str]:
     lost = []
     if server.startup_timeout_sec is not None:
         lost.append("startup_timeout_sec")
-    if not server.enabled:
-        lost.append("enabled=false (the server is written enabled)")
     if server.url:
         lost += [
             f
@@ -578,6 +580,7 @@ class ClaudeCodeAdapter(ToolAdapter):
         scope_args = ["-s", MCP_SCOPE]
         refused: list[Conflict] = []
         gaps: list[str] = []
+        disabled: set[str] = set()
         steps: list[tuple[str, list[RunCli]]] = []  # (server name, its ops in order)
 
         def add_op(name: str, entry: dict) -> RunCli:
@@ -597,6 +600,13 @@ class ClaudeCodeAdapter(ToolAdapter):
             )
 
         for name, server in desired.items():
+            if not server.enabled:
+                disabled.add(name)
+                gaps.append(
+                    f"{name}: disabled in the source; Claude Code has no per-server switch, "
+                    "so it is not written"
+                )
+                continue
             fatal = _fatal(server)
             if fatal:
                 gaps.append(f"{name}: not written, {fatal}")
@@ -632,7 +642,7 @@ class ClaudeCodeAdapter(ToolAdapter):
                     ],
                 )
             )
-        for name in sorted(owned - desired.keys()):
+        for name in sorted(owned - (desired.keys() - disabled)):
             if name not in config.members:
                 continue
             old = config.members[name]
@@ -678,16 +688,16 @@ class ClaudeCodeAdapter(ToolAdapter):
     def normalize_mcp(self, servers: Mapping[str, McpServer]) -> dict[str, McpServer]:
         """What `read_mcp` returns after `servers` were written (for writable servers).
 
-        Lost: `startup_timeout_sec`, `cwd`, `auth` (OAuth is the default; nothing is written for
-        it) and `enabled=false` (read back as enabled); for a remote server also command, args,
-        env and env_vars; for a local one the headers. The `.cmd` suffix of a launcher is not part
-        of the neutral view.
+        A server with `enabled=False` is not written, so it is not in the result. Lost for the
+        others: `startup_timeout_sec`, `cwd` and `auth` (OAuth is the default; nothing is written
+        for it); for a remote server also command, args, env and env_vars; for a local one the
+        headers. The `.cmd` suffix of a launcher is not part of the neutral view.
         """
         out = {}
         for name, server in servers.items():
-            server = replace(
-                _canon_server(server), startup_timeout_sec=None, auth=None, cwd=None, enabled=True
-            )
+            if not server.enabled:
+                continue
+            server = replace(_canon_server(server), startup_timeout_sec=None, auth=None, cwd=None)
             if server.url:
                 server = replace(server, command=None, args=(), env=(), env_vars=())
             else:
@@ -704,9 +714,11 @@ class ClaudeCodeAdapter(ToolAdapter):
             "the file is only read: a server added by Claude Code between the plan and the apply "
             "makes the add fail and the engine reverts; a change in between is not detected "
             "(a RunCli has no drift check)",
-            "MCP: cwd, startup_timeout_sec and enabled=false cannot be stored (a disabled server "
-            "is written enabled); a remote server cannot carry args, env, env_vars or cwd; "
-            "OAuth is Claude Code's default and is not written",
+            "MCP: cwd and startup_timeout_sec cannot be stored; a remote server cannot carry "
+            "args, env, env_vars or cwd; OAuth is Claude Code's default and is not written",
+            "MCP: a server disabled in the source (enabled=false) is not written, because Claude "
+            "Code has no per-server switch; an owned one is removed, one that is not owned is "
+            "left alone",
             "MCP: a secret is referenced as ${NAME}; a literal secret in the user's own entry "
             "is never read into the neutral model, and an owned entry that holds one is not "
             "removed or replaced (it would reach a command line and the journal): a conflict",

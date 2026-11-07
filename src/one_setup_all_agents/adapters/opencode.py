@@ -72,6 +72,8 @@ from ..model import (
     Unsupported,
 )
 from ._common import (
+    decode_text,
+    encode_text,
     is_absolute,
     plan_skill_links,
     plan_whole_file_instructions,
@@ -140,18 +142,6 @@ def skills_dir(env: Env) -> Path:
 # -- reading the config file -------------------------------------------------------------------
 
 
-def _decode_text(raw: bytes) -> tuple[str, bool, bool]:
-    """(text with LF newlines, had a BOM, used CRLF)."""
-    bom = raw.startswith(b"\xef\xbb\xbf")
-    body = raw[3:] if bom else raw
-    return body.decode("utf-8").replace("\r\n", "\n"), bom, b"\r\n" in body
-
-
-def _encode_text(text: str, bom: bool, crlf: bool) -> bytes:
-    out = text.replace("\n", "\r\n") if crlf else text
-    return (b"\xef\xbb\xbf" if bom else b"") + out.encode("utf-8")
-
-
 def _entry_shaped(value: object) -> bool:
     return isinstance(value, dict) and (
         value.get("type") in ("local", "remote") or "command" in value or "url" in value
@@ -196,7 +186,7 @@ def load_config(path: Path) -> _Config:
     if not raw.strip():
         return _Config(path, raw, {}, None, False)
     try:
-        text, _bom, _crlf = _decode_text(raw)
+        text, _bom, _crlf = decode_text(raw)
         doc = jsonc.loads(text)
     except (UnicodeDecodeError, ValueError) as exc:
         raise ConfigUnreadable(f"cannot parse {path.name} as JSON with comments ({exc})") from exc
@@ -391,7 +381,7 @@ def _apply_edit(current: bytes | None, spec: _McpEdit) -> bytes:
     if current is None or not current.strip():
         doc = {"$schema": SCHEMA_URL, "mcp": {"servers": dict(spec.adds)}}
         return (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-    text, bom, crlf = _decode_text(current)
+    text, bom, crlf = decode_text(current)
     doc = jsonc.loads(text)
     container, _v1 = _locate(doc)
     try:
@@ -415,7 +405,7 @@ def _apply_edit(current: bytes | None, spec: _McpEdit) -> bytes:
     except jsonc_edit.EditError as exc:
         raise ValueError(f"cannot edit the OpenCode config ({exc})") from exc
     _check_result(text, spec)
-    return _encode_text(text, bom, crlf)
+    return encode_text(text, bom, crlf)
 
 
 def _check_result(text: str, spec: _McpEdit) -> None:

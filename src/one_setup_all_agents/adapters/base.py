@@ -38,12 +38,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import ClassVar
 
 from ..model import (
     Detection,
     Env,
     Instructions,
+    ItemRef,
     Kind,
     McpServer,
     Op,
@@ -52,6 +54,7 @@ from ..model import (
     Scope,
     SkillRef,
     Unsupported,
+    WantedLink,
 )
 
 
@@ -122,6 +125,30 @@ class ToolAdapter(ABC):
         Owned skills missing from `desired` are withdrawn with `Link(target=None)`. A destination
         that exists and is not owned is a `Conflict` (ADR 0007).
         """
+
+    def wanted_links(self, env: Env, scope: Scope, desired: Sequence[SkillRef]) -> list[WantedLink]:
+        """The skill links this adapter wants to exist for `desired`, op or no op. Read-only.
+
+        The engine uses it to keep a link that one tool withdraws while another tool still wants
+        it, in a folder two tools share (docs/decisions/0012). The default fits every adapter that
+        links one folder per skill into `paths().skills_dir` (`plan_skill_links`); an adapter that
+        places skills another way overrides it, or returns `[]` to say it shares nothing.
+        """
+        directory = self.paths(env, scope).skills_dir
+        if Kind.SKILLS not in self.capabilities or directory is None:
+            return []
+        return [
+            WantedLink(
+                link=directory / skill.name,
+                target=skill.path,
+                ref=ItemRef(self.id, Kind.SKILLS, skill.name),
+            )
+            for skill in desired
+            if skill.name
+            and skill.name not in (".", "..")
+            and not any(sep in skill.name for sep in "/\\")
+            and Path(skill.path).is_dir()
+        ]
 
     # -- optional kinds (later releases) -----------------------------------
 

@@ -112,10 +112,9 @@ class Base(unittest.TestCase):
 
 
 class RegistryTests(unittest.TestCase):
-    def test_opencode_is_a_real_adapter_and_two_tools_are_still_stubs(self):
+    def test_opencode_is_a_real_adapter_and_only_agy_is_still_a_stub(self):
         self.assertNotIsInstance(get_adapter("opencode"), StubAdapter)
-        for tool in ("codex", "agy"):
-            self.assertIsInstance(get_adapter(tool), StubAdapter, tool)
+        self.assertIsInstance(get_adapter("agy"), StubAdapter)
 
 
 # -- paths ---------------------------------------------------------------------------------------

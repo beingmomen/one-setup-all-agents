@@ -1,6 +1,6 @@
 # 0011: Claude Code adapter
 
-Status: Proposed
+Status: Accepted
 
 This records the choices made while porting the Claude Code adapter (`adapters/claude_code.py`). It changes no rule of 0005 to 0010. Where it settles an open point of an accepted ADR, it says so. Facts marked [docs] come from the official Claude Code documentation, [prototype] from the legacy implementation this project grew out of (ported in `_core/`), and [unverified] were not checked against a live tool.
 
@@ -32,18 +32,19 @@ The binary is `ALL_AGENTS_CLAUDE_BIN` (a path, the prototype's variable; a path 
 
 **Not representable, so `Unsupported` (never silent):**
 
-- `cwd`: not a documented key [docs]. The prototype wrote it; whether Claude Code honors it is [unverified], so it is not written.
+- `cwd`: not a documented key [docs]. The prototype wrote it; whether Claude Code honors it is [unverified], so it stays unsupported until a documented key exists.
 - `startup_timeout_sec`: Claude Code has only the global `MCP_TIMEOUT`.
-- `enabled = false`: the user scope has no per-server switch [docs] (disabling is a per-project list). The prototype wrote a `disabled` key whose effect is not documented. The server is written ENABLED and the plan says so (see open points).
 - For an http server: `command`, `args`, `env`, `env_vars`, `cwd`. For a stdio server: `headers`.
 - `auth`: documentation only; OAuth is the default.
 - Not written at all, with a reason: a server name the CLI rejects (only letters, digits, hyphen and underscore, not starting with a hyphen), an env literal containing `${` (Claude Code would expand it), an invalid variable, header or scheme name.
 
 `normalize_mcp` lists exactly what does not survive a round trip.
 
+**A disabled server is not written (`enabled = false`).** The user scope has no per-server switch [docs] (disabling is a per-project list), and the prototype's `disabled` key has no documented effect. Writing the server would turn on something the source disables, so a desired server with `enabled = false` means "should not be present in Claude Code": absent, nothing is planned; present and owned, it is removed by the normal remove path (with a `release`, and with the secret-value refusal above); present and not owned, it is left alone, with no `Conflict` just for being disabled. In every case one `Unsupported` line names the server ("disabled in the source; Claude Code has no per-server switch, so it is not written"). `normalize_mcp` leaves such a server out. The contract suite got a hook, `AdapterContract.unwritten_mcp()`, so an adapter can declare the harness server names it deliberately does not write (`demo-off` for this adapter); nothing else may be dropped.
+
 **Windows launchers.** `npx`, `npm`, `pnpm` and `yarn` are written as plain names on every platform. The prototype did exactly this for Claude Code ("Windows resolves these only as `.cmd` outside Claude Code") and ran it live, and the Claude Code changelog removed its "requires a `cmd /c` wrapper" warning as a false positive [docs]. This differs from the OpenCode adapter, which writes `.cmd` on Windows. Not re-verified here with a live tool.
 
-**Skills.** One `Link` per skill straight from `<config-dir>/skills/<name>` (the source) into `<claude config>/skills/<name>`, with the copy fallback of 0007. Claude Code does not read `~/.agents/skills` [docs, prototype]. The prototype's chain `repo -> ~/.agents/skills -> ~/.claude/skills` is therefore not reproduced: there is no intermediate folder. The folders `.trash` and `synced` (managed by Claude Code and claude.ai) are not listed by `read_skills` and are never touched. Symlinks and junctions are followed on Windows [prototype]; Linux and macOS are [unverified] (0007 open point).
+**Skills.** One `Link` per skill straight from `<config-dir>/skills/<name>` (the source) into `<claude config>/skills/<name>`, with the copy fallback of 0007. Claude Code does not read `~/.agents/skills` [docs, prototype]. The prototype's chain `repo -> ~/.agents/skills -> ~/.claude/skills` is therefore not reproduced: there is no intermediate folder. Skill exclusion is decided but not built: a per-tool exclude list in `config.toml` (the prototype's `claude_exclude`), applied by the loader before the desired skills reach the adapter, so the adapter needs no knob; an owned skill that falls out of the list is withdrawn like any other. Future work for the loader (Phase 4/5). The folders `.trash` and `synced` (managed by Claude Code and claude.ai) are not listed by `read_skills` and are never touched. Symlinks and junctions are followed on Windows [prototype]; Linux and macOS are [unverified] (0007 open point).
 
 **Shared code.** The whole-file instructions rule and the per-skill link planner are identical for OpenCode and Claude Code and live in `adapters/_common.py`. OpenCode's behavior and tests are unchanged.
 
@@ -53,13 +54,15 @@ The binary is `ALL_AGENTS_CLAUDE_BIN` (a path, the prototype's variable; a path 
 - A plan that says "not stored" for each lost field keeps the product honest (0008); writing an undocumented key to make a round trip look clean would not.
 - Refusing a `.cmd` shim with risky characters is cheaper than debugging a mangled server entry.
 
+## Consequences accepted by the maintainer
+
+- **Undo is by inverse command, not by bytes.** Undoing an MCP change runs the recorded inverse (`remove`, or `add-json` with the old entry). The servers are restored; the bytes of `.claude.json` may differ afterwards, because the real CLI may reformat the file and order servers differently. The contract suite checks exact bytes only because its fake CLI writes a canonical form.
+- **The prototype's links are adopted by `init` (Phase 4).** Existing junctions `~/.claude/skills/<name> -> ~/.agents/skills/<name>` are not owned and differ from the source, so until then they are reported as `Conflict`. `init` adopts them into ownership. Skills installed by other means into `~/.agents/skills` no longer reach Claude Code unless they are in the source.
+- **`cwd` stays unsupported** (above) and **skill exclusion lives in the loader** (above).
+
 ## Open points
 
-- **`enabled = false`.** Recommendation: the engine should not send a disabled server to a tool that has no per-server switch (choosing servers per tool is the engine's job, 0009), instead of the adapter writing it enabled. Until then the adapter writes it enabled and reports it. Alternative: write the prototype's `disabled: true`, which is undocumented.
-- **`cwd`.** Recommendation: leave it unsupported until a documented key exists.
-- **Skills exclude list (`claude_exclude` of the prototype).** The adapter has no knob: a per-tool selection of skills is made by the engine through a per-adapter `DesiredState` (0010), and an owned skill missing from it is withdrawn. Recommendation: `config.toml` gets a per-tool exclude list that the loader applies; no adapter change.
-- **Migration of the prototype's links.** Existing junctions `~/.claude/skills/<name> -> ~/.agents/skills/<name>` are not owned, differ from the source, and are reported as `Conflict`. `init` has to adopt or replace them. Skills installed by other means into `~/.agents/skills` no longer reach Claude Code unless they are in the source.
 - **A `RunCli` has no drift check (0010).** An entry changed by a session between the plan and the apply is removed and re-added from the planned view. The window is small; an `add` of a name that appeared meanwhile fails and is reverted.
-- **Undo is by inverse command, not by bytes.** The real CLI may reformat `.claude.json` and order servers differently after an undo; the servers are the same. The contract suite checks exact bytes only because its fake CLI is canonical.
 - **Unverified with a live tool:** Windows launcher names without `.cmd`, `CLAUDE_CONFIG_DIR`, symlinks on Linux and macOS, and everything on macOS.
 - The version of the `claude` CLI is not read (`detect()` must not start a program).
+- The secret-value refusal uses the project's heuristics, so an owned entry with a long opaque argument can be refused without holding a secret; the user then edits it by hand.

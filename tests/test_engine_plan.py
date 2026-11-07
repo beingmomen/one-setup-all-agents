@@ -9,7 +9,14 @@ from engine_support import EngineCase, can_make_dir_link
 from example_adapter import ExampleAdapter, ExampleCliAdapter, FakeExampleCli
 from one_setup_all_agents.engine import journal
 from one_setup_all_agents.engine.apply import apply_plan
-from one_setup_all_agents.engine.plan import DesiredState, build_plan, merge_links, render_plan
+from one_setup_all_agents.engine.plan import (
+    DesiredState,
+    _norm,
+    build_plan,
+    merge_links,
+    render_plan,
+)
+from one_setup_all_agents.engine.revert import revert_operation
 from one_setup_all_agents.model import (
     INSTRUCTIONS_KEY,
     Conflict,
@@ -23,6 +30,7 @@ from one_setup_all_agents.model import (
     RunCli,
     SkillRef,
     Unsupported,
+    WantedLink,
 )
 
 SERVER = McpServer(
@@ -217,6 +225,201 @@ class SharedLinkTests(PlanCase):
         src = self.home / "src"
         merged = merge_links([Link(self.skills / "a", src, "a"), Link(self.skills / "b", src, "b")])
         self.assertEqual(len(merged), 2)
+
+
+class WithdrawnSharedLinkTests(PlanCase):
+    """Tool A withdraws a skill, tool B still wants it and plans nothing (the link is as wanted).
+
+    The removal must not delete the shared link; A stops owning it and B owns it (ADR 0012).
+    """
+
+    def setUp(self):
+        super().setUp()
+        if not can_make_dir_link(self.root):
+            self.skipTest("this machine cannot create a directory link")
+        self.dest = self.home / ".example" / "skills" / "demo-skill"
+        self.skill_ref = self.skill("demo-skill")
+
+    def plan(self, example_skills, shared_skills):
+        return build_plan(
+            self.env,
+            [ExampleAdapter(), SharedSkillsAdapter()],
+            {
+                "example": DesiredState(skills=example_skills),
+                "shared": DesiredState(skills=shared_skills),
+            },
+        )
+
+    def owners(self):
+        return {
+            tool: journal.owned_for(self.state, tool, "skills") for tool in ("example", "shared")
+        }
+
+    def sync_both(self):
+        apply_plan(self.env, self.plan([self.skill_ref], [self.skill_ref]), label="both")
+        self.assertEqual(self.owners(), {"example": {"demo-skill"}, "shared": {"demo-skill"}})
+
+    def test_the_removal_becomes_a_release_only_op_and_the_link_survives(self):
+        self.sync_both()
+        plan = self.plan([], [self.skill_ref])
+        (op,) = plan.executable
+        self.assertIsInstance(op, Link)
+        self.assertEqual(op.target, self.skill_ref.path)
+        self.assertEqual(op.releases, (ItemRef("example", Kind.SKILLS, "demo-skill"),))
+        self.assertEqual(op.claims, (ItemRef("shared", Kind.SKILLS, "demo-skill"),))
+        apply_plan(self.env, plan, label="withdraw")
+        self.assertTrue(self.dest.is_dir(), "the shared link was deleted under the other tool")
+        self.assertEqual(self.owners(), {"example": set(), "shared": {"demo-skill"}})
+        self.assertTrue(self.plan([], [self.skill_ref]).is_empty)
+
+    def test_the_release_is_journaled_and_undone(self):
+        self.sync_both()
+        before = self.listing()
+        op_id = apply_plan(self.env, self.plan([], [self.skill_ref]), label="withdraw")
+        self.assertIsNotNone(op_id, "the ownership change must be journaled")
+        self.assertEqual(self.owners(), {"example": set(), "shared": {"demo-skill"}})
+        revert_operation(self.env, op_id)
+        self.assertEqual(self.owners(), {"example": {"demo-skill"}, "shared": {"demo-skill"}})
+        self.assertEqual(self.listing(), before)
+
+    def test_a_tool_that_was_equal_but_unowned_gains_ownership_and_undo_takes_it_back(self):
+        apply_plan(
+            self.env, build_plan(self.env, [ExampleAdapter()], self.desired_with()), label="a"
+        )
+        self.assertEqual(self.owners(), {"example": {"demo-skill"}, "shared": set()})
+        before = self.listing()
+        op_id = apply_plan(self.env, self.plan([], [self.skill_ref]), label="withdraw")
+        self.assertTrue(self.dest.is_dir())
+        self.assertEqual(self.owners(), {"example": set(), "shared": {"demo-skill"}})
+        revert_operation(self.env, op_id)
+        self.assertEqual(self.owners(), {"example": {"demo-skill"}, "shared": set()})
+        self.assertEqual(self.listing(), before)
+
+    def desired_with(self):
+        return DesiredState(skills=[self.skill_ref])
+
+    def test_when_every_owner_withdraws_the_link_is_removed(self):
+        self.sync_both()
+        plan = self.plan([], [])
+        (op,) = plan.executable
+        self.assertIsNone(op.target)
+        self.assertEqual({r.tool for r in op.releases}, {"example", "shared"})
+        apply_plan(self.env, plan, label="all gone")
+        self.assertFalse(self.dest.exists())
+        self.assertEqual(self.owners(), {"example": set(), "shared": set()})
+
+    def test_a_tool_that_is_not_in_the_build_does_not_keep_the_link(self):
+        self.sync_both()
+        plan = build_plan(
+            self.env, [ExampleAdapter()], {"example": DesiredState(skills=[])}
+        )  # `shared` is not asked: it cannot keep anything
+        (op,) = plan.executable
+        self.assertIsNone(op.target)
+
+    def test_a_tool_that_does_not_manage_skills_in_this_run_does_not_keep_the_link(self):
+        self.sync_both()
+        plan = build_plan(
+            self.env,
+            [ExampleAdapter(), SharedSkillsAdapter()],
+            {"example": DesiredState(skills=[]), "shared": DesiredState(mcp={})},
+        )
+        (op,) = [op for op in plan.executable if isinstance(op, Link)]
+        self.assertIsNone(op.target)
+
+    def test_a_link_that_does_not_point_where_the_other_tool_wants_is_not_kept_for_it(self):
+        self.sync_both()
+        other = self.skill("elsewhere").path
+        wish = WantedLink(self.dest, other, ItemRef("shared", Kind.SKILLS, "demo-skill"))
+        removal = Link(
+            self.dest, None, "gone", releases=(ItemRef("example", Kind.SKILLS, "demo-skill"),)
+        )
+        merged = merge_links([removal], {_norm(self.dest): [wish]})
+        self.assertIsNone(merged[0].target, "the link does not give what the other tool wants")
+
+    def test_the_wanting_tool_must_be_another_one(self):
+        self.sync_both()
+        ref = ItemRef("example", Kind.SKILLS, "demo-skill")
+        removal = Link(self.dest, None, "gone", releases=(ref,))
+        own_wish = {_norm(self.dest): [WantedLink(self.dest, self.skill_ref.path, ref)]}
+        self.assertIsNone(merge_links([removal], own_wish)[0].target)
+
+    def test_a_removal_without_wanted_links_is_unchanged(self):
+        ref = ItemRef("example", Kind.SKILLS, "demo-skill")
+        removal = Link(self.dest, None, "gone", releases=(ref,))
+        self.assertEqual(merge_links([removal]), [removal])
+        self.assertEqual(merge_links([removal], {}), [removal])
+
+    def test_the_kept_link_is_shown_in_the_dry_run(self):
+        self.sync_both()
+        text = render_plan(self.plan([], [self.skill_ref]))
+        self.assertIn("keep the shared link", text)
+        self.assertIn("shared", text)
+
+
+class RealToolsSharedSkillsTests(PlanCase):
+    """The real OpenCode and Codex adapters both link into one temporary ~/.agents/skills."""
+
+    def setUp(self):
+        super().setUp()
+        if not can_make_dir_link(self.root):
+            self.skipTest("this machine cannot create a directory link")
+        from one_setup_all_agents.adapters.codex import CodexAdapter
+        from one_setup_all_agents.adapters.opencode import OpenCodeAdapter
+
+        self.adapters = [OpenCodeAdapter(), CodexAdapter()]
+        self.skill_a, self.skill_b = self.skill("demo-skill-a"), self.skill("demo-skill-b")
+        self.shared = self.home / ".agents" / "skills"
+
+    def plan(self, opencode, codex):
+        return build_plan(
+            self.env,
+            self.adapters,
+            {"opencode": DesiredState(skills=opencode), "codex": DesiredState(skills=codex)},
+        )
+
+    def owners(self):
+        return {t: journal.owned_for(self.state, t, "skills") for t in ("opencode", "codex")}
+
+    def test_one_tool_withdrawing_a_skill_leaves_the_link_to_the_other_and_undo_restores_both(self):
+        both = [self.skill_a, self.skill_b]
+        apply_plan(self.env, self.plan(both, both), label="both")
+        both_owned = self.owners()
+        self.assertEqual(both_owned["opencode"], {"demo-skill-a", "demo-skill-b"})
+        self.assertEqual(both_owned["codex"], {"demo-skill-a", "demo-skill-b"})
+        before = self.listing()
+
+        # OpenCode drops skill b; Codex keeps both: the shared link of b must survive.
+        plan = self.plan([self.skill_a], both)
+        (op,) = plan.executable
+        self.assertEqual(op.link, self.shared / "demo-skill-b")
+        self.assertIsNotNone(op.target)
+        op_id = apply_plan(self.env, plan, label="opencode drops b")
+        self.assertTrue((self.shared / "demo-skill-b" / "SKILL.md").is_file())
+        self.assertEqual(self.owners()["opencode"], {"demo-skill-a"})
+        self.assertEqual(self.owners()["codex"], {"demo-skill-a", "demo-skill-b"})
+        self.assertTrue(self.plan([self.skill_a], both).is_empty)
+
+        # now Codex drops b too: the last owner is gone, so the link goes
+        last = apply_plan(
+            self.env, self.plan([self.skill_a], [self.skill_a]), label="codex drops b"
+        )
+        self.assertFalse((self.shared / "demo-skill-b").exists())
+        self.assertTrue((self.shared / "demo-skill-a").is_dir())
+
+        revert_operation(self.env, last)  # newest first
+        self.assertTrue((self.shared / "demo-skill-b").is_dir())
+        revert_operation(self.env, op_id)
+        self.assertEqual(self.owners(), both_owned)
+        self.assertEqual(self.listing(), before)
+
+    def test_a_tool_that_never_made_the_link_gains_it_when_the_owner_withdraws(self):
+        apply_plan(self.env, self.plan([self.skill_a], None), label="opencode only")
+        self.assertEqual(self.owners(), {"opencode": {"demo-skill-a"}, "codex": set()})
+        plan = self.plan([], [self.skill_a])  # the same skill moves from one tool to the other
+        apply_plan(self.env, plan, label="moves")
+        self.assertTrue((self.shared / "demo-skill-a").is_dir())
+        self.assertEqual(self.owners(), {"opencode": set(), "codex": {"demo-skill-a"}})
+        self.assertTrue(self.plan([], [self.skill_a]).is_empty)
 
 
 class RenderTests(PlanCase):

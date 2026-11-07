@@ -111,7 +111,10 @@ def contract_namespace() -> dict:
     def make_cli(self, env):
         return FakeClaudeCli(Path(env.home) / ".claude.json")
 
-    return {"make_env": make_env, "make_cli": make_cli}
+    def unwritten_mcp(self):
+        return frozenset({"demo-off"})  # enabled=False: Claude Code has no per-server switch
+
+    return {"make_env": make_env, "make_cli": make_cli, "unwritten_mcp": unwritten_mcp}
 
 
 def _platform() -> str:

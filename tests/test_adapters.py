@@ -76,9 +76,9 @@ class StubBehaviorTests(unittest.TestCase):
                 self.assertIsInstance(ops[0], Unsupported)
                 self.assertEqual(ops[0].tool, tool)
 
-    def test_exactly_the_two_unported_tools_are_still_stubs(self):
+    def test_only_antigravity_is_still_a_stub(self):
         stubs = [a.id for a in all_adapters() if isinstance(a, StubAdapter)]
-        self.assertEqual(stubs, ["codex", "agy"])
+        self.assertEqual(stubs, ["agy"])
 
 
 if __name__ == "__main__":

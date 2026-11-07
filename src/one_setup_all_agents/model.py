@@ -177,6 +177,22 @@ class SkillRef:
     is_link: bool = False
 
 
+@dataclass(frozen=True)
+class WantedLink:
+    """A skill link an adapter wants to exist after a sync, whether or not it plans any op for it.
+
+    Adapters plan nothing for a link that is already as wanted, so the plan alone cannot tell the
+    engine that a path is still in use. `ToolAdapter.wanted_links` returns these so that the
+    engine can keep a link that one tool withdraws while another still wants it
+    (docs/decisions/0012).
+    """
+
+    link: Path  # where the link lives
+    target: Path  # the source folder it must point at
+    ref: ItemRef  # the item the wanting tool would own
+    allow_copy_fallback: bool = True
+
+
 # ---------------------------------------------------------------------------
 # Operations. The engine executes EditFile, RunCli and Link and nothing else. Unsupported and
 # Conflict are plan entries that are never executed: they make a gap or a refusal visible.

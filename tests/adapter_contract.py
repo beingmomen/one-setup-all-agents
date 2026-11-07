@@ -107,11 +107,13 @@ class Desired:
     instructions: str
     mcp: dict[str, McpServer]
     skills: list[SkillRef]
+    #: MCP names this adapter deliberately does not write (see `AdapterContract.unwritten_mcp`)
+    unwritten: frozenset[str] = frozenset()
 
     def keys(self, kind: Kind) -> set[str]:
         return {
             Kind.INSTRUCTIONS: {INSTRUCTIONS_KEY},
-            Kind.MCP: set(self.mcp),
+            Kind.MCP: set(self.mcp) - self.unwritten,
             Kind.SKILLS: {s.name for s in self.skills},
         }[kind]
 
@@ -189,6 +191,7 @@ class Harness:
                 "demo-off": McpServer(name="demo-off", command="demo-off-cmd", enabled=False),
             },
             skills=[self.skill_source("demo-skill-a"), self.skill_source("demo-skill-b")],
+            unwritten=frozenset(self.case.unwritten_mcp()),
         )
 
     def changed(self, d: Desired) -> Desired:
@@ -201,12 +204,13 @@ class Harness:
             env_vars=("DEMO_TOKEN",),
             env=(("DEMO_MODE", "other"),),
         )
-        return Desired(d.instructions + "More.\n", mcp, list(d.skills))
+        return Desired(d.instructions + "More.\n", mcp, list(d.skills), d.unwritten)
 
     def reduced(self, d: Desired) -> Desired:
         """The same state with one MCP server and one skill gone."""
         mcp = {k: v for k, v in d.mcp.items() if k != "demo-remote"}
-        return Desired(d.instructions, mcp, [s for s in d.skills if s.name != "demo-skill-b"])
+        skills = [s for s in d.skills if s.name != "demo-skill-b"]
+        return Desired(d.instructions, mcp, skills, d.unwritten)
 
     # -- planning and applying ---------------------------------------------------------------
 
@@ -266,6 +270,13 @@ class AdapterContract:
 
     def seed_home(self, env: Env) -> None:
         """Create the user's own native config (for example one MCP server of the user's own)."""
+
+    def unwritten_mcp(self) -> frozenset[str]:
+        """Names of the harness's desired MCP servers that this adapter deliberately does not write
+        (for example `demo-off`, which has `enabled=False`, for a tool with no per-server switch).
+        They must be absent from `normalize_mcp`, from the claims and from `owned`; nothing else
+        may be dropped."""
+        return frozenset()
 
     def make_cli(self, env: Env) -> Callable | None:
         """A fake for the adapter's CLI if it plans `RunCli` ops; it must never run a program."""
@@ -361,7 +372,11 @@ class AdapterContract:
                     self.assertEqual(got.path, a.paths(h.env, Scope.GLOBAL).instructions)
                 if Kind.MCP in self.caps(h):
                     expected = a.normalize_mcp(d.mcp)
-                    self.assertEqual(set(expected), set(d.mcp), "normalize_mcp must keep the names")
+                    self.assertEqual(
+                        set(expected),
+                        set(d.mcp) - d.unwritten,
+                        "normalize_mcp must keep the names, except the declared unwritten ones",
+                    )
                     read = a.read_mcp(h.env, Scope.GLOBAL)
                     for name, server in expected.items():
                         self.assertIn(name, read, f"MCP server {name} was not written")
@@ -465,7 +480,7 @@ class AdapterContract:
                         self.assertEqual(h.owned[kind], d.keys(kind), kind.value)
                 h.sync(h.reduced(d))
                 if Kind.MCP in self.caps(h):
-                    self.assertEqual(h.owned[Kind.MCP], set(h.reduced(d).mcp))
+                    self.assertEqual(h.owned[Kind.MCP], h.reduced(d).keys(Kind.MCP))
                 if Kind.SKILLS in self.caps(h):
                     self.assertEqual(h.owned[Kind.SKILLS], {"demo-skill-a"})
 
@@ -502,7 +517,7 @@ class AdapterContract:
                 self.assertTrue(plan.is_empty, f"nothing should change: {plan.ops}")
                 h.sync(h.changed(partial))
                 read = a.read_mcp(h.env, Scope.GLOBAL)
-                for name in set(user_mcp) | {"demo-remote", "demo-off"}:
+                for name in set(user_mcp) | ({"demo-remote", "demo-off"} - d.unwritten):
                     self.assertIn(name, read, f"unowned MCP server {name} was removed")
                     self.assertEqual(read[name], others_before[name], f"unowned {name} was changed")
                 names = {s.name: s for s in a.read_skills(h.env, Scope.GLOBAL)}

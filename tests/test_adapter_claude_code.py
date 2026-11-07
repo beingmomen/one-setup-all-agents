@@ -127,10 +127,9 @@ class Base(unittest.TestCase):
 
 
 class RegistryTests(unittest.TestCase):
-    def test_claude_is_a_real_adapter_and_two_tools_are_still_stubs(self):
+    def test_claude_is_a_real_adapter_and_only_agy_is_still_a_stub(self):
         self.assertNotIsInstance(get_adapter("claude"), StubAdapter)
-        for tool in ("codex", "agy"):
-            self.assertIsInstance(get_adapter(tool), StubAdapter, tool)
+        self.assertIsInstance(get_adapter("agy"), StubAdapter)
 
 
 # -- paths ---------------------------------------------------------------------------------------
@@ -375,7 +374,6 @@ class McpFormatTests(Base):
             cwd="work",
             startup_timeout_sec=5,
             auth="oauth",
-            enabled=False,
         )
         out = self.adapter.normalize_mcp({"demo-server": full})["demo-server"]
         self.assertEqual(out.command, "npx")  # the .cmd suffix is not part of the neutral view
@@ -637,14 +635,12 @@ class McpUnsupportedTests(Base):
         gaps = [o for o in ops if isinstance(o, Unsupported)]
         return ops, (gaps[0].reason if gaps else None)
 
-    def test_cwd_timeout_and_disabled_are_reported_not_silently_dropped(self):
-        server = self.stdio(cwd="work", startup_timeout_sec=30, enabled=False)
+    def test_cwd_and_timeout_are_reported_not_silently_dropped(self):
+        server = self.stdio(cwd="work", startup_timeout_sec=30)
         ops, reason = self.gap(server)
-        for word in ("cwd", "startup_timeout_sec", "enabled=false"):
+        for word in ("cwd", "startup_timeout_sec"):
             self.assertIn(word, reason)
-        entry = self.entry_of(self.clis(ops)[0])
-        self.assertNotIn("cwd", entry)
-        self.assertNotIn("disabled", entry)  # written enabled; the plan says so
+        self.assertNotIn("cwd", self.entry_of(self.clis(ops)[0]))
 
     def test_remote_server_fields_with_no_place_are_reported(self):
         server = McpServer(
@@ -685,6 +681,69 @@ class McpUnsupportedTests(Base):
         ops = self.plan_mcp({"demo-server": McpServer(name="demo-server")})
         self.assertEqual(self.clis(ops), [])
         self.assertIn("demo-server", self.servers())
+
+
+class DisabledServerTests(Base):
+    """`enabled=False` means "should not be present": Claude Code has no per-server switch."""
+
+    def off(self, name="demo-off"):
+        return self.stdio(name, enabled=False)
+
+    def only_gap(self, ops, name):
+        gaps = [o for o in ops if isinstance(o, Unsupported)]
+        self.assertEqual(len(gaps), 1)
+        self.assertIn(f"{name}: disabled in the source", gaps[0].reason)
+        self.assertIn("no per-server switch", gaps[0].reason)
+        self.assertIn("not written", gaps[0].reason)
+
+    def test_disabled_and_absent_plans_nothing_but_the_report(self):
+        ops = self.plan_mcp({"demo-off": self.off()})
+        self.assertEqual([type(o) for o in ops], [Unsupported])
+        self.only_gap(ops, "demo-off")
+        self.assertTrue(Plan(ops).is_empty)  # a permanent gap, not a pending change
+
+    def test_disabled_and_owned_is_removed_with_a_release_and_the_inverse_re_adds_it(self):
+        seed_claude_home(self.env)
+        self.sync_mcp({"demo-off": self.stdio("demo-off")})  # it was enabled before
+        old = self.servers()["demo-off"]
+        ops = self.plan_mcp({"demo-off": self.off()})
+        run = self.clis(ops)
+        self.assertEqual([op.argv[2:4] for op in run], [["remove", "demo-off"]])
+        self.assertEqual([r.key for r in run[0].releases], ["demo-off"])
+        self.assertEqual(json.loads(run[0].inverse_argv[4]), old)
+        self.only_gap(ops, "demo-off")
+        self.applier.apply(Plan(ops))
+        self.assertNotIn("demo-off", self.servers())
+        self.assertEqual(self.owned(Kind.MCP), set())
+        again = self.plan_mcp({"demo-off": self.off()})
+        self.assertEqual([type(o) for o in again], [Unsupported])
+
+    def test_disabled_and_unowned_is_left_alone_without_a_conflict(self):
+        seed_claude_home(self.env)
+        before = self.state_file.read_bytes()
+        for entry in ("user-local", "user-remote"):
+            ops = self.plan_mcp({entry: self.off(entry)})
+            self.assertEqual([type(o) for o in ops], [Unsupported])
+        self.assertEqual(self.state_file.read_bytes(), before)
+
+    def test_removing_a_disabled_owned_entry_still_refuses_a_secret_value(self):
+        self.sync_mcp({"demo-off": self.stdio("demo-off")})
+        doc = self.doc()
+        doc["mcpServers"]["demo-off"]["env"] = {"API_TOKEN": "FAKE-LITERAL-zq81"}
+        self.write_state(doc)
+        ops = self.plan_mcp({"demo-off": self.off()})
+        self.assertEqual(sorted(type(o).__name__ for o in ops), ["Conflict", "Unsupported"])
+        self.assertEqual(Plan(ops).executable, [])
+        self.assertNotIn("FAKE-LITERAL", repr(ops))
+
+    def test_a_disabled_server_is_not_a_named_conflict_when_unreadable(self):
+        self.write_state(b"[1]")
+        ops = self.plan_mcp({"demo-off": self.off()})
+        self.assertEqual([type(o) for o in ops], [Conflict])  # the file is refused as a whole
+
+    def test_normalize_mcp_leaves_a_disabled_server_out(self):
+        out = self.adapter.normalize_mcp({"a": self.stdio("a"), "b": self.off("b")})
+        self.assertEqual(set(out), {"a"})
 
 
 class UnreadableConfigTests(Base):

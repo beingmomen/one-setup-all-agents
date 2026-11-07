@@ -1,0 +1,29 @@
+# The user's own Codex settings: comments, ordering and unrelated tables must survive.
+model = "fake-model"
+approval_policy = "on-request"
+
+[features]
+demo_flag = true # keep this comment
+
+[projects.'/work/demo']
+trust_level = "trusted"
+
+# the user's own remote server; its literal header is not ours
+[mcp_servers.user-remote]
+url = "https://user.example.test/mcp"
+bearer_token_env_var = "USER_TOKEN"
+tool_timeout_sec = 90
+
+[mcp_servers.user-remote.http_headers]
+X-Demo = "literal-header"
+
+# the user's own local server with a literal value that must never be read
+[mcp_servers.user-local]
+command = "npx"
+args = ["-y", "user-mcp"]
+
+[mcp_servers.user-local.env]
+USER_TOKEN = "FAKE-ENV-SECRET-aaa111"
+
+[tui]
+notifications = true
