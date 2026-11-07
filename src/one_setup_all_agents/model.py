@@ -7,8 +7,9 @@ These are the only objects that cross the adapter/engine boundary
   results and lists of `Op`.
 - The engine consumes `Op` objects and is the only code that touches the disk.
 
-Phase 0: the shapes below are the contract sketched in the design; field details
-are expected to change while the first adapter is ported, before v0.1.
+The shapes follow docs/decisions/0008 (boundary) and 0009 (interface v1: item keys,
+ownership claims, conflicts, neutral MCP fields). Still pre-alpha: porting the first real
+adapter may refine them, through a new ADR.
 """
 
 from __future__ import annotations
@@ -36,6 +37,28 @@ class Kind(enum.Enum):
     HOOKS = "hooks"
     PERMISSIONS = "permissions"
     MEMORY = "memory"
+
+
+#: The item key of a tool's instructions. The instructions file is owned as one item.
+#: The item keys of the other kinds are the MCP server name and the skill name.
+INSTRUCTIONS_KEY = "instructions"
+
+#: What an adapter receives as `owned`: the item keys of ONE kind that the ledger records as
+#: created by this tool's adapter (docs/decisions/0005, 0009). Anything else is the user's.
+Owned = frozenset[str]
+
+
+@dataclass(frozen=True)
+class ItemRef:
+    """One managed item: a tool, a kind and the item key (see `INSTRUCTIONS_KEY`).
+
+    Ops carry these in `claims` and `releases`, so the engine can update the ledger's
+    `owned` table without knowing anything about the tool.
+    """
+
+    tool: str
+    kind: Kind
+    key: str
 
 
 @dataclass(frozen=True)
@@ -83,14 +106,40 @@ class Instructions:
 
 
 @dataclass(frozen=True)
+class HeaderRef:
+    """An HTTP header whose value comes from an environment variable (`Bearer ${TOKEN}`).
+
+    Only the variable NAME is stored. A literal header value is not representable.
+    """
+
+    name: str  # header name, for example "Authorization"
+    env_var: str  # name of the environment variable that holds the value
+    scheme: str | None = None  # word before the value, for example "Bearer"
+
+
+@dataclass(frozen=True)
 class McpServer:
-    """A tool-neutral MCP server definition. Secrets are env-var names only, never values."""
+    """A tool-neutral MCP server definition. Secrets are env-var names only, never values.
+
+    A server is stdio (`command`, `args`, `cwd`) or http (`url`, `headers`); `transport` follows
+    from which one is set. A tool that cannot express a field loses it; the adapter's
+    `normalize_mcp` says how (docs/decisions/0009).
+    """
 
     name: str
     command: str | None = None
     args: tuple[str, ...] = ()
     url: str | None = None
     env_vars: tuple[str, ...] = ()  # names of environment variables, never values
+    headers: tuple[HeaderRef, ...] = ()  # http only; values come from environment variables
+    cwd: str | None = None  # stdio only
+    auth: str | None = None  # None, "oauth" or "none"; documentation, no tool needs a key for it
+    enabled: bool = True
+    startup_timeout_sec: int | None = None  # only some tools (Codex) can express it
+
+    @property
+    def transport(self) -> str:
+        return "http" if self.url else "stdio"
 
 
 @dataclass(frozen=True)
@@ -103,7 +152,8 @@ class SkillRef:
 
 
 # ---------------------------------------------------------------------------
-# Operations. The engine executes exactly these four and nothing else.
+# Operations. The engine executes EditFile, RunCli and Link and nothing else. Unsupported and
+# Conflict are plan entries that are never executed: they make a gap or a refusal visible.
 # ---------------------------------------------------------------------------
 
 
@@ -120,6 +170,8 @@ class EditFile:
     expect_sha256: str | None
     description: str
     sensitive: bool = False  # new file gets mode 0600 instead of the umask default
+    claims: tuple[ItemRef, ...] = ()  # items this op creates or updates: they become `owned`
+    releases: tuple[ItemRef, ...] = ()  # items this op removes: they leave `owned`
 
 
 @dataclass(frozen=True)
@@ -132,16 +184,24 @@ class RunCli:
     argv: Sequence[str]
     inverse_argv: Sequence[str]
     description: str
+    claims: tuple[ItemRef, ...] = ()
+    releases: tuple[ItemRef, ...] = ()
 
 
 @dataclass(frozen=True)
 class Link:
-    """Make `link` point at `target` (symlink, junction, or copy fallback)."""
+    """Make `link` point at `target` (symlink, junction, or copy fallback).
+
+    `target=None` removes the link. It must be a link, junction or marked copy that the ledger
+    records as owned; this is how a skill that left the source is withdrawn.
+    """
 
     link: Path
-    target: Path
+    target: Path | None
     description: str
     allow_copy_fallback: bool = False
+    claims: tuple[ItemRef, ...] = ()
+    releases: tuple[ItemRef, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -153,7 +213,27 @@ class Unsupported:
     reason: str
 
 
-Op = EditFile | RunCli | Link | Unsupported
+@dataclass(frozen=True)
+class Conflict:
+    """An item the plan will not touch, with the reason. Never executed.
+
+    Two cases (docs/decisions/0007, 0003): the destination exists and the ledger does not record
+    it as owned (the user's own entry is left alone), or the desired content cannot be written
+    (for example instructions over a tool's size limit). Different from `Unsupported`, which
+    means the tool cannot express the kind at all.
+    """
+
+    tool: str
+    kind: Kind
+    key: str  # the item key (see `INSTRUCTIONS_KEY`)
+    reason: str
+    path: Path | None = None  # the destination that is in the way, if there is one
+
+
+Op = EditFile | RunCli | Link | Unsupported | Conflict
+
+#: The ops the engine executes. The other ops only describe the plan.
+EXECUTABLE_OPS = (EditFile, RunCli, Link)
 
 
 @dataclass
@@ -163,5 +243,20 @@ class Plan:
     ops: list[Op] = field(default_factory=list)
 
     @property
+    def executable(self) -> list[Op]:
+        """The ops the engine would run."""
+        return [op for op in self.ops if isinstance(op, EXECUTABLE_OPS)]
+
+    @property
+    def conflicts(self) -> list[Conflict]:
+        return [op for op in self.ops if isinstance(op, Conflict)]
+
+    @property
     def is_empty(self) -> bool:
-        return not any(not isinstance(op, Unsupported) for op in self.ops)
+        """True when there is nothing to run and nothing to report.
+
+        `Unsupported` entries do not count: they are a permanent gap of the tool, not a pending
+        change. A `Conflict` does count: the desired state is not reached and the user must be
+        told, so a conflict-only plan is not empty (and has no executable ops).
+        """
+        return not any(isinstance(op, (*EXECUTABLE_OPS, Conflict)) for op in self.ops)

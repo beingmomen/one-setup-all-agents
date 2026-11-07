@@ -52,9 +52,9 @@ class StubBehaviorTests(unittest.TestCase):
                 lambda a=adapter: a.read_instructions(env, Scope.GLOBAL),
                 lambda a=adapter: a.read_mcp(env, Scope.GLOBAL),
                 lambda a=adapter: a.read_skills(env, Scope.GLOBAL),
-                lambda a=adapter: a.plan_instructions(env, Scope.GLOBAL, "", {}),
-                lambda a=adapter: a.plan_mcp(env, Scope.GLOBAL, {}, {}),
-                lambda a=adapter: a.plan_skills(env, Scope.GLOBAL, [], {}),
+                lambda a=adapter: a.plan_instructions(env, Scope.GLOBAL, "", frozenset()),
+                lambda a=adapter: a.plan_mcp(env, Scope.GLOBAL, {}, frozenset()),
+                lambda a=adapter: a.plan_skills(env, Scope.GLOBAL, [], frozenset()),
             )
             for call in calls:
                 with self.assertRaises(NotImplementedError) as ctx:
@@ -67,7 +67,7 @@ class StubBehaviorTests(unittest.TestCase):
         env = _env()
         adapter = get_adapter("opencode")
         for plan in (adapter.plan_hooks, adapter.plan_permissions, adapter.plan_memory):
-            ops = plan(env, Scope.GLOBAL, None, {})
+            ops = plan(env, Scope.GLOBAL, None, frozenset())
             self.assertEqual(len(ops), 1)
             self.assertIsInstance(ops[0], Unsupported)
             self.assertEqual(ops[0].tool, "opencode")

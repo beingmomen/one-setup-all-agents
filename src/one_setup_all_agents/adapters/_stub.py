@@ -9,7 +9,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from ..model import Detection, Env, Instructions, McpServer, Op, Paths, Scope, SkillRef
+from ..model import (
+    Detection,
+    Env,
+    Instructions,
+    McpServer,
+    Op,
+    Owned,
+    Paths,
+    Scope,
+    SkillRef,
+)
 from .base import ToolAdapter
 
 
@@ -36,17 +46,15 @@ class StubAdapter(ToolAdapter):
     def read_skills(self, env: Env, scope: Scope) -> list[SkillRef]:
         raise self._todo("read_skills")
 
-    def plan_instructions(
-        self, env: Env, scope: Scope, desired: str, owned: Mapping[str, object]
-    ) -> list[Op]:
+    def plan_instructions(self, env: Env, scope: Scope, desired: str, owned: Owned) -> list[Op]:
         raise self._todo("plan_instructions")
 
     def plan_mcp(
-        self, env: Env, scope: Scope, desired: Mapping[str, McpServer], owned: Mapping[str, object]
+        self, env: Env, scope: Scope, desired: Mapping[str, McpServer], owned: Owned
     ) -> list[Op]:
         raise self._todo("plan_mcp")
 
     def plan_skills(
-        self, env: Env, scope: Scope, desired: Sequence[SkillRef], owned: Mapping[str, object]
+        self, env: Env, scope: Scope, desired: Sequence[SkillRef], owned: Owned
     ) -> list[Op]:
         raise self._todo("plan_skills")
