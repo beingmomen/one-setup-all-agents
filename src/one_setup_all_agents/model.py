@@ -19,6 +19,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ._core.mask import env_value_looks_secret
+
 
 class Scope(enum.Enum):
     """Where a setting applies. v0.1 supports GLOBAL only; PROJECT arrives in v0.2."""
@@ -119,7 +121,14 @@ class HeaderRef:
 
 @dataclass(frozen=True)
 class McpServer:
-    """A tool-neutral MCP server definition. Secrets are env-var names only, never values.
+    """A tool-neutral MCP server definition. A secret is referenced by env-var NAME, never stored.
+
+    - `env_vars`: names of variables the tool passes on from its own environment.
+    - `env`: literal NON-secret values to set (for example `MODE=test`), as `(name, value)`
+      pairs sorted by name. A value that looks like a secret raises `ValueError` here, so no
+      adapter can carry one; a name may not be in both `env` and `env_vars`.
+    - `headers`: http header values always come from a variable (`HeaderRef`); literal header
+      values are not representable.
 
     A server is stdio (`command`, `args`, `cwd`) or http (`url`, `headers`); `transport` follows
     from which one is set. A tool that cannot express a field loses it; the adapter's
@@ -131,11 +140,28 @@ class McpServer:
     args: tuple[str, ...] = ()
     url: str | None = None
     env_vars: tuple[str, ...] = ()  # names of environment variables, never values
+    env: tuple[tuple[str, str], ...] = ()  # literal non-secret values, sorted by name
     headers: tuple[HeaderRef, ...] = ()  # http only; values come from environment variables
     cwd: str | None = None  # stdio only
     auth: str | None = None  # None, "oauth" or "none"; documentation, no tool needs a key for it
     enabled: bool = True
     startup_timeout_sec: int | None = None  # only some tools (Codex) can express it
+
+    def __post_init__(self) -> None:
+        pairs = self.env.items() if isinstance(self.env, Mapping) else self.env
+        env = tuple(sorted((str(k), str(v)) for k, v in pairs))
+        names = [k for k, _ in env]
+        if len(names) != len(set(names)):
+            raise ValueError(f"{self.name}: a name appears twice in env")
+        both = sorted(set(names) & set(self.env_vars))
+        if both:
+            raise ValueError(f"{self.name}: {both} is in both env and env_vars")
+        for key, value in env:
+            if env_value_looks_secret(key, value):
+                raise ValueError(
+                    f"{self.name}: env {key} looks like a secret; pass it by name in env_vars"
+                )
+        object.__setattr__(self, "env", env)
 
     @property
     def transport(self) -> str:

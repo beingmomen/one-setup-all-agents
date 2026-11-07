@@ -220,7 +220,9 @@ class ExampleAdapter(ToolAdapter):
         if server.cwd:
             entry["cwd"] = server.cwd
         if server.env_vars:
-            entry["env"] = list(server.env_vars)
+            entry["env_pass"] = list(server.env_vars)
+        if server.env:
+            entry["env"] = dict(server.env)
         if server.headers:
             entry["headers"] = [
                 {"name": h.name, "env": h.env_var, **({"scheme": h.scheme} if h.scheme else {})}
@@ -239,7 +241,8 @@ class ExampleAdapter(ToolAdapter):
             command=entry.get("command"),
             args=tuple(entry.get("args", ())),
             url=entry.get("url"),
-            env_vars=tuple(entry.get("env", ())),
+            env_vars=tuple(entry.get("env_pass", ())),
+            env=tuple(entry.get("env", {}).items()),
             headers=tuple(
                 HeaderRef(h["name"], h["env"], h.get("scheme")) for h in entry.get("headers", ())
             ),

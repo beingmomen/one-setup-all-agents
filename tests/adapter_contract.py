@@ -141,6 +141,7 @@ class Harness:
                     command="demo-cmd",
                     args=("--flag", "value"),
                     env_vars=("DEMO_TOKEN",),
+                    env=(("DEMO_MODE", "test"), ("DEMO_LEVEL", "2")),
                     cwd="work",
                     startup_timeout_sec=60,
                 ),
@@ -159,7 +160,11 @@ class Harness:
         """The same state with one change in each kind."""
         mcp = dict(d.mcp)
         mcp["demo-server"] = McpServer(
-            name="demo-server", command="demo-cmd", args=("--other",), env_vars=("DEMO_TOKEN",)
+            name="demo-server",
+            command="demo-cmd",
+            args=("--other",),
+            env_vars=("DEMO_TOKEN",),
+            env=(("DEMO_MODE", "other"),),
         )
         return Desired(d.instructions + "More.\n", mcp, list(d.skills))
 

@@ -1,7 +1,8 @@
 """Masking of anything secret-looking in text that all-agents prints.
 
-all-agents never stores env values or header values at all (names only). This module covers the
-remaining places a literal secret can hide: `command`, `args` and `url`.
+The neutral model keeps env-variable and header-variable NAMES, plus non-secret literal env values
+(`env_value_looks_secret` is the one check for those). This module also covers the places a literal
+secret can hide: `command`, `args` and `url`.
 Env references (${VAR}, {env:VAR}, {{VAR}}, {{$VAR}}, $VAR, %VAR%) are names, not secrets, and are kept.
 """
 
@@ -38,6 +39,14 @@ _SECRET_FLAG = re.compile(
 )
 _LONG_TOKEN = re.compile(r"^[A-Za-z0-9_+=.-]{32,}$")
 
+# A variable name that suggests a secret, and a value that is only a reference to a variable.
+SECRET_NAME = re.compile(
+    r"(?i)(token|secret|passw(or)?d|api[_-]?key|credential|private[_-]?key|access[_-]?key)"
+)
+ENV_REF = re.compile(
+    r"^(\$\{[^}]+\}|\{env:[^}]+\}|\{\{\$?[A-Za-z_]\w*\}\}|\$[A-Za-z_]\w*|%[^%]+%)$"
+)
+
 
 def _is_ref(value):
     return bool(re.match(r"^(\$\{|\{env:|\{\{\$?[A-Za-z_]|\$[A-Za-z_]|%[A-Za-z_])", value))
@@ -56,6 +65,19 @@ def mask_text(text):
         # a whole argument that is one long opaque string (key-like); paths and URLs never match
         s = MASK
     return s
+
+
+def env_value_looks_secret(name, value):
+    """True when an env entry `name=value` must not be stored as a literal.
+
+    A value that masking would change looks like a secret; so does any non-empty value of a
+    secret-sounding name unless it is only a reference to a variable. Used by the legacy source
+    and by `McpServer` so the rule exists once.
+    """
+    value = "" if value is None else str(value)
+    return mask_text(value) != value or bool(
+        SECRET_NAME.search(str(name)) and value and not ENV_REF.match(value.strip())
+    )
 
 
 def mask_args(args):

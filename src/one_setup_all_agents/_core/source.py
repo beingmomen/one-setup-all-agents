@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 from . import jsonc
-from .mask import mask_text
+from .mask import env_value_looks_secret, mask_text
 from .parsers import TOOLS
 
 SERVER_FIELDS = {
@@ -56,10 +56,6 @@ _PLACEHOLDER = re.compile(
 MCP_REMOTE = "mcp-remote@0.15.2"  # pinned: the one bridge from stdio to a remote http server (GitHub preset and header wrappers)
 _HDR_LITERAL_BAD = re.compile(r"[{}$]")
 _HDR_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
-_SECRET_NAME = re.compile(
-    r"(?i)(token|secret|passw(or)?d|api[_-]?key|credential|private[_-]?key|access[_-]?key)"
-)
-_REF = re.compile(r"^(\$\{[^}]+\}|\{env:[^}]+\}|\{\{\$?[A-Za-z_]\w*\}\}|\$[A-Za-z_]\w*|%[^%]+%)$")
 
 
 class SourceError(Exception):
@@ -136,8 +132,7 @@ class Spec:
                     f"{n}: env_pass holds variable NAMES only (got something that is not a name)"
                 )
         for k, v in self.env.items():
-            v = "" if v is None else str(v)
-            if mask_text(v) != v or (_SECRET_NAME.search(k) and v and not _REF.match(v.strip())):
+            if env_value_looks_secret(k, v):
                 raise SourceError(f"{n}: env {k} looks like a secret; the source holds names only")
 
 

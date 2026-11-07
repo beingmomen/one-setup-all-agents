@@ -206,6 +206,16 @@ class LossyRoundTrip(ExampleAdapter):
         return entry
 
 
+class DropsLiteralEnv(ExampleAdapter):
+    """Drops the literal `env` values when writing, and does not say so in `normalize_mcp`."""
+
+    @staticmethod
+    def _encode(server):
+        entry = ExampleAdapter._encode(server)
+        entry.pop("env", None)
+        return entry
+
+
 class DropsUnsupportedKinds(ExampleAdapter):
     def plan_hooks(self, env, scope, desired, owned):
         return []
@@ -320,6 +330,13 @@ class BrokenAdaptersAreCaught(unittest.TestCase):
             "did not round-trip",
         )
 
+    def test_literal_env_values_that_are_dropped(self):
+        self.assert_caught(
+            DropsLiteralEnv,
+            "test_reading_what_a_plan_produces_returns_the_desired_state",
+            "did not round-trip",
+        )
+
     def test_unsupported_kind_that_is_silently_dropped(self):
         self.assert_caught(
             DropsUnsupportedKinds,
@@ -404,7 +421,43 @@ class McpServerShapeTests(unittest.TestCase):
     def test_defaults(self):
         server = McpServer("a", command="c")
         self.assertEqual((server.enabled, server.auth, server.cwd), (True, None, None))
-        self.assertEqual((server.headers, server.env_vars), ((), ()))
+        self.assertEqual((server.headers, server.env_vars, server.env), ((), (), ()))
+
+    def test_literal_env_is_sorted_so_equality_is_stable(self):
+        one = McpServer("a", command="c", env=(("B_MODE", "x"), ("A_MODE", "y")))
+        two = McpServer("a", command="c", env={"A_MODE": "y", "B_MODE": "x"})
+        self.assertEqual(one.env, (("A_MODE", "y"), ("B_MODE", "x")))
+        self.assertEqual(one, two)
+        self.assertEqual(hash(one), hash(two))
+
+    def test_a_secret_looking_value_is_rejected(self):
+        for name, value in (
+            ("DEMO_API_KEY", "plain-literal"),  # secret-sounding name, not a reference
+            ("DEMO_NOTE", "ghp_" + "a1" * 12),  # a known token shape
+            ("DEMO_URL", "https://demo.example.test/x?token=abcdef123456"),
+        ):
+            with self.assertRaises(ValueError, msg=name):
+                McpServer("a", command="c", env=((name, value),))
+
+    def test_a_reference_to_a_variable_is_allowed_for_a_secret_sounding_name(self):
+        server = McpServer("a", command="c", env=(("DEMO_API_KEY", "${DEMO_API_KEY}"),))
+        self.assertEqual(server.env, (("DEMO_API_KEY", "${DEMO_API_KEY}"),))
+
+    def test_a_name_in_both_env_and_env_vars_is_rejected(self):
+        with self.assertRaises(ValueError):
+            McpServer("a", command="c", env_vars=("DEMO_MODE",), env=(("DEMO_MODE", "test"),))
+
+    def test_a_repeated_env_name_is_rejected(self):
+        with self.assertRaises(ValueError):
+            McpServer("a", command="c", env=(("DEMO_MODE", "1"), ("DEMO_MODE", "2")))
+
+    def test_the_legacy_source_and_the_model_share_one_check(self):
+        from one_setup_all_agents._core import source
+        from one_setup_all_agents._core.mask import env_value_looks_secret
+
+        self.assertIs(source.env_value_looks_secret, env_value_looks_secret)
+        self.assertFalse(env_value_looks_secret("DEMO_MODE", "test"))
+        self.assertTrue(env_value_looks_secret("DEMO_TOKEN", "abc"))
 
 
 # -- 3. the registered adapters -------------------------------------------------------------------

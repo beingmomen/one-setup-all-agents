@@ -12,4 +12,4 @@ Short ADRs. Each one gives the decision, the reason and the open points. Status 
 | [0006](0006-atomic-writes.md) | Atomic writes, permissions and symlinks | Accepted |
 | [0007](0007-skills-distribution.md) | Skills distribution per OS | Accepted (several behaviors unverified) |
 | [0008](0008-adapter-engine-boundary.md) | Adapter and engine boundary | Accepted |
-| [0009](0009-adapter-interface-v1.md) | Adapter interface v1 | Proposed |
+| [0009](0009-adapter-interface-v1.md) | Adapter interface v1 | Accepted |
