@@ -5,6 +5,7 @@ from pathlib import Path
 
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
 from one_setup_all_agents.adapters import ADAPTERS, all_adapters, get_adapter
+from one_setup_all_agents.adapters._stub import StubAdapter
 from one_setup_all_agents.adapters.base import ToolAdapter
 from one_setup_all_agents.model import Env, Kind, Scope, Unsupported
 
@@ -46,6 +47,8 @@ class StubBehaviorTests(unittest.TestCase):
     def test_required_methods_raise_clear_not_implemented(self):
         env = _env()
         for adapter in all_adapters():
+            if not isinstance(adapter, StubAdapter):
+                continue  # ported adapters are covered by test_adapter_opencode and the contract suite
             calls = (
                 lambda a=adapter: a.detect(env),
                 lambda a=adapter: a.paths(env, Scope.GLOBAL),
@@ -65,12 +68,17 @@ class StubBehaviorTests(unittest.TestCase):
 
     def test_optional_kinds_default_to_unsupported_not_silence(self):
         env = _env()
-        adapter = get_adapter("opencode")
-        for plan in (adapter.plan_hooks, adapter.plan_permissions, adapter.plan_memory):
-            ops = plan(env, Scope.GLOBAL, None, frozenset())
-            self.assertEqual(len(ops), 1)
-            self.assertIsInstance(ops[0], Unsupported)
-            self.assertEqual(ops[0].tool, "opencode")
+        for tool in ("opencode", "claude", "codex", "agy"):
+            adapter = get_adapter(tool)
+            for plan in (adapter.plan_hooks, adapter.plan_permissions, adapter.plan_memory):
+                ops = plan(env, Scope.GLOBAL, None, frozenset())
+                self.assertEqual(len(ops), 1)
+                self.assertIsInstance(ops[0], Unsupported)
+                self.assertEqual(ops[0].tool, tool)
+
+    def test_exactly_the_three_unported_tools_are_still_stubs(self):
+        stubs = [a.id for a in all_adapters() if isinstance(a, StubAdapter)]
+        self.assertEqual(stubs, ["claude", "codex", "agy"])
 
 
 if __name__ == "__main__":

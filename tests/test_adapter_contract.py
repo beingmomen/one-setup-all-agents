@@ -46,6 +46,7 @@ from one_setup_all_agents.model import (
     Scope,
     Unsupported,
 )
+from opencode_support import seed_opencode_home
 
 # -- 1. the example adapters pass ----------------------------------------------------------------
 
@@ -465,7 +466,7 @@ class McpServerShapeTests(unittest.TestCase):
 
 #: Optional: adapter id -> function(env) that creates the user's own native config in the fake
 #: home. Needed only when an adapter's fixture should start non-empty.
-REGISTERED_SEEDS = {}
+REGISTERED_SEEDS = {"opencode": seed_opencode_home}
 
 
 def contract_case_for(adapter_cls):

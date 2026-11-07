@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // The user's own settings: comments, block comments, trailing commas, "//" inside strings.
+  "model": "fake/model", /* inline block comment */
+  "theme": "demo",
+  "mcp": {
+    "timeout": { "startup": 45000 },
+    "servers": {
+      // the user's own remote server; its oauth setting is not ours
+      "user-remote": {
+        "type": "remote",
+        "url": "https://user.example.test/mcp", // keep this comment
+        "oauth": false,
+      },
+      /* the user's own local server with a literal value that must never be read */
+      "user-local": {
+        "type": "local",
+        "command": ["npx", "-y", "user-mcp"],
+        "environment": { "USER_TOKEN": "FAKE-ENV-SECRET-aaa111" },
+      },
+    },
+  },
+}

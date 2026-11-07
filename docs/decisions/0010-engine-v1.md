@@ -1,6 +1,6 @@
 # 0010: Engine v1
 
-Status: Proposed
+Status: Accepted
 
 This records the choices made while building `engine/` (plan item "Build the unified engine"): one operation model, one journal for backup and ledger, automatic revert when a write fails. It changes no rule of 0002, 0005, 0006, 0007, 0008 or 0009. Where it settles an open point of an accepted ADR, it says so. The legacy formats in `_core/` are not wired to this engine and stay until the adapters are ported, so "one journal instead of four formats" is true for the new engine only.
 
