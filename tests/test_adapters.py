@@ -48,7 +48,7 @@ class StubBehaviorTests(unittest.TestCase):
         env = _env()
         for adapter in all_adapters():
             if not isinstance(adapter, StubAdapter):
-                continue  # ported adapters are covered by test_adapter_opencode and the contract suite
+                continue  # ported adapters are covered by their own test module and the contract suite
             calls = (
                 lambda a=adapter: a.detect(env),
                 lambda a=adapter: a.paths(env, Scope.GLOBAL),
@@ -76,9 +76,9 @@ class StubBehaviorTests(unittest.TestCase):
                 self.assertIsInstance(ops[0], Unsupported)
                 self.assertEqual(ops[0].tool, tool)
 
-    def test_exactly_the_three_unported_tools_are_still_stubs(self):
+    def test_exactly_the_two_unported_tools_are_still_stubs(self):
         stubs = [a.id for a in all_adapters() if isinstance(a, StubAdapter)]
-        self.assertEqual(stubs, ["claude", "codex", "agy"])
+        self.assertEqual(stubs, ["codex", "agy"])
 
 
 if __name__ == "__main__":

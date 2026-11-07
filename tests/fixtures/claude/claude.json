@@ -1,0 +1,39 @@
+{
+  "numStartups": 12,
+  "theme": "dark",
+  "mcpServers": {
+    "user-remote": {
+      "type": "http",
+      "url": "https://user.example.test/mcp",
+      "headers": {
+        "Authorization": "Bearer ${USER_TOKEN}"
+      },
+      "oauth": {
+        "scopes": "read"
+      }
+    },
+    "user-local": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "user-mcp"
+      ],
+      "env": {
+        "USER_TOKEN": "FAKE-ENV-SECRET-aaa111"
+      }
+    }
+  },
+  "projects": {
+    "/work/demo": {
+      "allowedTools": [],
+      "mcpServers": {
+        "project-only": {
+          "type": "stdio",
+          "command": "project-cmd",
+          "args": []
+        }
+      }
+    }
+  }
+}

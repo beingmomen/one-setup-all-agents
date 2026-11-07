@@ -23,6 +23,8 @@ from pathlib import Path
 
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
 from adapter_contract import AdapterContract, Harness, is_under
+from claude_support import contract_namespace as claude_namespace
+from claude_support import seed_claude_home
 from example_adapter import (
     ExampleAdapter,
     ExampleCliAdapter,
@@ -466,7 +468,11 @@ class McpServerShapeTests(unittest.TestCase):
 
 #: Optional: adapter id -> function(env) that creates the user's own native config in the fake
 #: home. Needed only when an adapter's fixture should start non-empty.
-REGISTERED_SEEDS = {"opencode": seed_opencode_home}
+REGISTERED_SEEDS = {"opencode": seed_opencode_home, "claude": seed_claude_home}
+
+#: Optional: adapter id -> function() returning extra members for its contract class (the hooks
+#: `make_env` and `make_cli` of `AdapterContract`). Needed by an adapter that plans `RunCli` ops.
+REGISTERED_EXTRAS = {"claude": claude_namespace}
 
 
 def contract_case_for(adapter_cls):
@@ -486,6 +492,9 @@ def contract_case_for(adapter_cls):
         "make_adapter": lambda self: adapter_cls(),
         "seed_home": lambda self, env: seed(env) if seed else None,
     }
+    extras = REGISTERED_EXTRAS.get(adapter_cls.id)
+    if extras:
+        namespace.update(extras())
     return type(name, (AdapterContract, unittest.TestCase), namespace)
 
 
