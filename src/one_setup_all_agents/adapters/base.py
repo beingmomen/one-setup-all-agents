@@ -28,9 +28,10 @@ Required: `detect`, `paths`, `read_*`, `plan_instructions`, `plan_mcp`, `plan_sk
 Optional (hooks, permissions, memory): the defaults below return an `Unsupported`
 op so the plan shows the gap as lossy instead of silently skipping it.
 
-The reusable contract test is `tests/adapter_contract.py` (CONTRIBUTING.md). Its undo check
-runs against a test stand-in until the engine exists, so the undo guarantee of
-docs/decisions/0005 is not proven yet.
+The reusable contract test is `tests/adapter_contract.py` (CONTRIBUTING.md). It applies and
+undoes the ops with the real engine (`engine/`), so a passing adapter has shown, in a temporary
+home, that its ops are undone to the exact bytes, modes, links and ownership. What that does and
+does not prove is in docs/decisions/0010-engine-v1.md.
 """
 
 from __future__ import annotations

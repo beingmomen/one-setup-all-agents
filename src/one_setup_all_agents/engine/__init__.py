@@ -3,13 +3,20 @@
 Adapters return `Op` objects (see `one_setup_all_agents.model`). The engine turns a
 plan into effects, and records every effect so that `undo` can reverse it:
 
-    plan.py     merge the adapters' ops into one reviewable `Plan` (dry run output)
-    apply.py    lock, snapshot, run each op, verify, roll back on failure
+    plan.py     merge the adapters' ops into one reviewable `Plan`; render it (dry run output)
+    apply.py    lock, journal, run each op, verify, revert on failure; crash recovery
+    revert.py   put an operation back from its journal (the low-level undo, with the drift check)
     atomic.py   crash-safe file writes (docs/decisions/0006)
-    backup.py   store the "before" state of every file or link an op changes
+    backup.py   capture and restore the "before" state of every file, link or copied tree
     journal.py  the single operation journal and ownership ledger (docs/decisions/0005)
-    undo.py     reverse an operation from its journal
+    links.py    execute a `Link` op: junction, symlink, copy fallback, owned removal
+    runcli.py   run a `RunCli` op through an injectable runner
+    fsops.py    the non-atomic file-system operations (folders, links, copied trees), in one place
     lock.py     one engine run at a time per state directory
+    errors.py   the engine's exceptions
+    undo.py     the user-facing `undo` command (Phase 5: still a stub)
 
-Phase 0: every function is a documented stub that raises NotImplementedError.
+Phase 3 (docs/decisions/0010-engine-v1.md): everything above is implemented except `undo.py`.
+The legacy formats in `_core/` are not wired to this engine yet; they stay until the adapters are
+ported.
 """

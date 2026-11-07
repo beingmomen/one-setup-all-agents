@@ -8,8 +8,9 @@
    names it; the moment an adapter stops being a stub it runs the full suite, with no edit here
    (an optional seed function for its fake home goes in `REGISTERED_SEEDS`).
 
-The undo check runs against a test stand-in (see tests/contract_applier.py): it does not prove
-the undo guarantee of docs/decisions/0005 until that seam points at `engine/`.
+Ops are applied and undone by the REAL engine (see tests/contract_applier.py), so a pass here
+exercises the undo guarantee of docs/decisions/0005; docs/decisions/0010 says exactly what that
+proves and what it does not.
 """
 
 import hashlib
@@ -74,7 +75,7 @@ class ExampleCliContract(AdapterContract, unittest.TestCase):
         h.sync(h.changed(d))
         h.sync(h.reduced(d))
         self.assertGreater(self.run_cli_count(h), 0)
-        self.assertGreater(len(h.applier._run_cli.calls), 0)  # went through the fake, no process
+        self.assertGreater(len(h.cli.calls), 0)  # went through the fake, no process
 
 
 class ExampleSpecificTests(unittest.TestCase):

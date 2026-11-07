@@ -26,9 +26,12 @@ What it checks, per capability the adapter declares:
 - every `RunCli` has a non-empty `inverse_argv`
 - ops claim exactly the items they create (that is how the ledger learns about them)
 
-The ops are applied by `contract_applier.make_applier`, a test stand-in. READ ITS DOCSTRING:
-until that one seam points at `engine/`, a pass here does not prove the `undo` guarantee of
-docs/decisions/0005.
+- the ledger's `owned` table follows the ops: claims add, releases remove, and an undo puts it back
+
+The ops are applied by `contract_applier.make_applier`, which is the REAL engine (`engine/`):
+journal, backups, atomic writes, drift preflight, ledger. The harness reads `owned` from the
+engine's ledger, not from bookkeeping of its own. What a pass proves and what it does not is in
+docs/decisions/0010-engine-v1.md ("What the contract suite proves").
 """
 
 from __future__ import annotations
@@ -44,6 +47,7 @@ import _bootstrap  # noqa: F401  (adds src/ to sys.path)
 import contract_applier
 from contract_applier import is_link, link_target, sha256_of
 from one_setup_all_agents.adapters.base import ToolAdapter
+from one_setup_all_agents.engine import journal
 from one_setup_all_agents.model import (
     INSTRUCTIONS_KEY,
     EditFile,
@@ -64,13 +68,20 @@ CORE_KINDS = (Kind.INSTRUCTIONS, Kind.MCP, Kind.SKILLS)
 OPTIONAL_KINDS = (Kind.HOOKS, Kind.PERMISSIONS, Kind.MEMORY)
 
 
-def snapshot(root: Path) -> dict[str, tuple]:
-    """Every folder, file (with bytes) and link (with target) under `root`, by relative path."""
+def snapshot(root: Path, exclude: tuple[Path, ...] = ()) -> dict[str, tuple]:
+    """Every folder, file (with bytes) and link (with target) under `root`, by relative path.
+
+    `exclude` lists folders to leave out (the engine's own state directory: the journal of an
+    undone operation is meant to stay, it is not part of "the home").
+    """
     out: dict[str, tuple] = {}
+    skip = {os.path.normcase(os.path.abspath(p)) for p in exclude}
 
     def walk(directory: Path) -> None:
         for name in sorted(os.listdir(directory)):
             path = directory / name
+            if os.path.normcase(os.path.abspath(path)) in skip:
+                continue
             rel = path.relative_to(root).as_posix()
             if is_link(path):
                 out[rel] = ("link", str(link_target(path)))
@@ -106,7 +117,11 @@ class Desired:
 
 
 class Harness:
-    """One fresh fake home plus the bookkeeping the engine and ledger will do for real."""
+    """One fresh fake home, applied to and undone by the real engine.
+
+    `owned` is read from the engine's ledger (and, for the tests that simulate a ledger that
+    forgot something, written to it); the harness keeps no list of its own.
+    """
 
     def __init__(self, case: AdapterContract, seed: bool) -> None:
         root = Path(tempfile.mkdtemp(prefix="osaa-contract-")).resolve()
@@ -119,10 +134,30 @@ class Harness:
         self.adapter = case.make_adapter()
         if seed:
             case.seed_home(self.env)
-        self.owned: dict[Kind, set[str]] = {kind: set() for kind in CORE_KINDS}
-        self.applier = contract_applier.make_applier(self.env, case.make_cli(self.env))
+        self.cli = case.make_cli(self.env)
+        self.applier = contract_applier.make_applier(self.env, self.cli)
         self.plans: list[Plan] = []  # every plan made, for the checks over all ops
-        self.receipts: list[tuple[list, dict]] = []  # (applier receipt, snapshot before)
+        # (applier receipt, snapshot of the home before, ledger `owned` before)
+        self.receipts: list[tuple[str | None, dict, dict]] = []
+
+    # -- the home and the ledger ---------------------------------------------------------------
+
+    def snap(self) -> dict[str, tuple]:
+        """The whole fake home and config, without the engine's own state directory."""
+        return snapshot(self.root, exclude=(self.env.state_dir,))
+
+    @property
+    def owned(self) -> dict[Kind, set[str]]:
+        """The adapter's owned keys per core kind, as the engine's ledger records them."""
+        return {
+            kind: set(journal.owned_for(self.env.state_dir, self.adapter.id, kind.value))
+            for kind in CORE_KINDS
+        }
+
+    @owned.setter
+    def owned(self, value: dict[Kind, set[str]]) -> None:
+        for kind in CORE_KINDS:
+            journal.set_owned(self.env.state_dir, self.adapter.id, kind.value, value[kind])
 
     # -- desired state ---------------------------------------------------------------------
 
@@ -201,21 +236,16 @@ class Harness:
         return plan
 
     def sync(self, desired: Desired) -> Plan:
-        """Plan, apply with the stand-in, then record claims and releases in the ledger."""
-        before = snapshot(self.root)
+        """Plan, then apply with the engine (which updates the ledger from the ops' claims)."""
+        before, owned_before = self.snap(), self.sorted_owned()
         plan = self.plan(desired)
         receipt = self.applier.apply(plan)
-        self.receipts.append((receipt, before))
-        for op in plan.executable:
-            for ref in op.claims:
-                self.owned[ref.kind].add(ref.key)
-            for ref in op.releases:
-                self.owned[ref.kind].discard(ref.key)
+        self.receipts.append((receipt, before, owned_before))
         return plan
 
     def undo_last(self) -> dict:
-        """Undo the latest sync; return the snapshot taken before it."""
-        receipt, before = self.receipts.pop()
+        """Undo the latest sync with the engine; return the snapshot taken before it."""
+        receipt, before, _owned_before = self.receipts.pop()
         self.applier.undo(receipt)
         return before
 
@@ -299,7 +329,7 @@ class AdapterContract:
                 h = Harness(self, seed)
                 env, scope, a = h.env, Scope.GLOBAL, h.adapter
                 d = h.desired()  # creates the skill sources in the config dir
-                before = snapshot(h.root)
+                before = h.snap()
 
                 def touch_everything(desired: Desired):
                     a.detect(env)
@@ -311,14 +341,12 @@ class AdapterContract:
                     h.plan(Desired("", {}, []))
 
                 touch_everything(d)
-                self.assertEqual(snapshot(h.root), before, "detect/read/plan changed the home")
+                self.assertEqual(h.snap(), before, "detect/read/plan changed the home")
                 h.sync(d)
-                after_sync = snapshot(h.root)
+                after_sync = h.snap()
                 touch_everything(h.changed(d))
                 touch_everything(h.reduced(d))
-                self.assertEqual(
-                    snapshot(h.root), after_sync, "an update/removal plan wrote to disk"
-                )
+                self.assertEqual(h.snap(), after_sync, "an update/removal plan wrote to disk")
 
     def test_reading_what_a_plan_produces_returns_the_desired_state(self):
         for seed in (False, True):
@@ -414,16 +442,32 @@ class AdapterContract:
             with self.subTest(seed=seed):
                 h = Harness(self, seed)
                 d = h.desired()
-                original = snapshot(h.root)
+                original = h.snap()
                 for desired in (d, h.changed(d), h.reduced(d)):
                     h.sync(desired)
                 while h.receipts:
-                    expected = h.receipts[-1][1]
+                    expected, expected_owned = h.receipts[-1][1], h.receipts[-1][2]
                     h.undo_last()
-                    self.assertEqual(snapshot(h.root), expected, "undo did not restore the files")
-                self.assertEqual(
-                    snapshot(h.root), original, "undoing everything did not restore the home"
-                )
+                    self.assertEqual(h.snap(), expected, "undo did not restore the files")
+                    self.assertEqual(
+                        h.sorted_owned(), expected_owned, "undo did not restore the ownership"
+                    )
+                self.assertEqual(h.snap(), original, "undoing everything did not restore the home")
+
+    def test_the_ledger_owns_exactly_what_the_ops_claimed(self):
+        for seed in (False, True):
+            with self.subTest(seed=seed):
+                h = Harness(self, seed)
+                d = h.desired()
+                h.sync(d)
+                for kind in CORE_KINDS:
+                    if kind in self.caps(h):
+                        self.assertEqual(h.owned[kind], d.keys(kind), kind.value)
+                h.sync(h.reduced(d))
+                if Kind.MCP in self.caps(h):
+                    self.assertEqual(h.owned[Kind.MCP], set(h.reduced(d).mcp))
+                if Kind.SKILLS in self.caps(h):
+                    self.assertEqual(h.owned[Kind.SKILLS], {"demo-skill-a"})
 
     def test_undo_leaves_absent_files_absent(self):
         h = Harness(self, False)
@@ -497,7 +541,7 @@ class AdapterContract:
                 other_a = h.skill_source("demo-skill-a", "-other")
                 wanted = h.changed(d)
                 wanted.skills = [SkillRef("demo-skill-a", other_a.path), *wanted.skills[1:]]
-                before = snapshot(h.root)
+                before = h.snap()
                 plan = h.plan(wanted)
                 conflicts = {(c.kind, c.key): c for c in plan.conflicts}
                 expected = {(Kind.INSTRUCTIONS, INSTRUCTIONS_KEY), (Kind.MCP, "demo-server")}
@@ -511,7 +555,7 @@ class AdapterContract:
                 self.assertEqual(plan.executable, [], f"unowned items would be changed: {plan.ops}")
                 self.assertFalse(plan.is_empty, "a plan with conflicts must not look empty")
                 h.applier.apply(plan)
-                self.assertEqual(snapshot(h.root), before, "a conflict changed the home")
+                self.assertEqual(h.snap(), before, "a conflict changed the home")
 
     def test_unowned_real_skill_folder_is_a_conflict(self):
         h = Harness(self, False)
@@ -521,7 +565,7 @@ class AdapterContract:
         dest = h.adapter.paths(h.env, Scope.GLOBAL).skills_dir / "demo-skill-a"
         dest.mkdir(parents=True)
         (dest / "SKILL.md").write_text("the user's own skill\n", "utf-8")
-        before = snapshot(h.root)
+        before = h.snap()
         plan = h.plan(d)
         self.assertIn(
             (Kind.SKILLS, "demo-skill-a"),
@@ -533,7 +577,7 @@ class AdapterContract:
         h.applier.apply(plan)
         self.assertEqual((dest / "SKILL.md").read_text("utf-8"), "the user's own skill\n")
         self.assertEqual(
-            {k: v for k, v in snapshot(h.root).items() if k.endswith("demo-skill-a/SKILL.md")},
+            {k: v for k, v in h.snap().items() if k.endswith("demo-skill-a/SKILL.md")},
             {k: v for k, v in before.items() if k.endswith("demo-skill-a/SKILL.md")},
         )
 
@@ -561,20 +605,21 @@ class AdapterContract:
             with self.subTest(seed=seed):
                 h = Harness(self, seed)
                 d = h.desired()
-                h.sync(d)
-                h.sync(h.changed(d))
-                h.sync(h.reduced(d))
+                for desired in (d, h.changed(d), h.reduced(d)):
+                    self.assert_inverses(h.plan(desired))  # before the engine would refuse it
+                    h.sync(desired)
                 h.owned = {kind: set() for kind in CORE_KINDS}
                 h.plan(h.changed(d))
-                for op in h.all_ops():
-                    if isinstance(op, RunCli):
-                        self.assertTrue(list(op.argv), "RunCli with no argv")
-                        self.assertTrue(
-                            list(op.inverse_argv), f"RunCli {list(op.argv)} has no inverse"
-                        )
-                        self.assertNotEqual(list(op.argv), list(op.inverse_argv))
-                        self.assertTrue(all(isinstance(x, str) for x in op.argv))
-                        self.assertTrue(all(isinstance(x, str) for x in op.inverse_argv))
+                self.assert_inverses(Plan(h.all_ops()))
+
+    def assert_inverses(self, plan: Plan) -> None:
+        for op in plan.ops:
+            if isinstance(op, RunCli):
+                self.assertTrue(list(op.argv), "RunCli with no argv")
+                self.assertTrue(list(op.inverse_argv), f"RunCli {list(op.argv)} has no inverse")
+                self.assertNotEqual(list(op.argv), list(op.inverse_argv))
+                self.assertTrue(all(isinstance(x, str) for x in op.argv))
+                self.assertTrue(all(isinstance(x, str) for x in op.inverse_argv))
 
     # for the negative tests: how many RunCli ops the runs above produced
     def run_cli_count(self, h: Harness) -> int:
