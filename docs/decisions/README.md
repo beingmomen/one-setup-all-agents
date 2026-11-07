@@ -17,3 +17,4 @@ Short ADRs. Each one gives the decision, the reason and the open points. Status 
 | [0011](0011-claude-code-adapter.md) | Claude Code adapter | Accepted |
 | [0012](0012-codex-adapter-and-shared-links.md) | Codex adapter and shared skill links | Accepted |
 | [0013](0013-antigravity-adapter.md) | Antigravity adapter | Accepted |
+| [0014](0014-tool-detection.md) | Tool detection and version probes | Proposed |

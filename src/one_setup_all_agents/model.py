@@ -78,15 +78,58 @@ class Env:
     state_dir: Path  # journal, backups, lock (see docs/decisions/0002)
 
 
+#: Where a tool's binary was found (`Detection.binary_source`): the tool's own override variable,
+#: the `PATH` of `Env.environ`, or a known per-OS install folder that is not on `PATH`.
+SOURCE_OVERRIDE = "env-override"
+SOURCE_PATH = "path"
+SOURCE_KNOWN_LOCATION = "known-location"
+
+#: `Detection.status` values.
+STATUS_INSTALLED = "installed"  # a binary was found
+STATUS_CONFIG_ONLY = "config-only"  # no binary, but the tool's config is there
+STATUS_ABSENT = "absent"  # neither
+
+
 @dataclass(frozen=True)
 class Detection:
-    """Result of `ToolAdapter.detect`: is the tool present, and where."""
+    """Result of `ToolAdapter.detect`: is the tool present, and where.
+
+    An adapter fills `installed`, `binary`, `binary_source`, `config_roots` and `warnings`; it never
+    starts a program, so `version` stays None there. `detect.detect_all` (docs/decisions/0014)
+    adds `tool`, `label`, `config_found` and, when the binary answers, `version`.
+
+    `installed` means "there is something of this tool to manage" (a binary or its config), as it
+    always did. `status` is the honest label: a tool with config but no binary is `config-only`.
+    """
 
     installed: bool
     binary: Path | None = None
     version: str | None = None
     config_roots: tuple[Path, ...] = ()
     warnings: tuple[str, ...] = ()
+    binary_source: str | None = None  # SOURCE_* of `binary`; None when there is no binary
+    tool: str = ""  # adapter id, filled by detect_all
+    label: str = ""  # adapter label, filled by detect_all
+    config_found: tuple[Path, ...] = ()  # the entries of `config_roots` that exist, by detect_all
+
+    @property
+    def status(self) -> str:
+        if self.binary is not None:
+            return STATUS_INSTALLED
+        return STATUS_CONFIG_ONLY if self.installed else STATUS_ABSENT
+
+
+@dataclass(frozen=True)
+class VersionProbe:
+    """How to read a tool's version: the command to run and how to read its output.
+
+    An adapter only DECLARES this (docs/decisions/0014); `detect.py` is the one place that runs
+    `argv`. `argv[0]` is the full path of the binary that was found. `parse` gets the captured
+    output (stdout, then stderr if stdout had no version) and returns the version, or None.
+    """
+
+    argv: tuple[str, ...]
+    parse: Callable[[str], str | None]
 
 
 @dataclass(frozen=True)

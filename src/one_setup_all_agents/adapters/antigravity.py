@@ -95,7 +95,6 @@ from __future__ import annotations
 import json
 import os
 import posixpath
-import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -119,11 +118,14 @@ from ..model import (
     Scope,
     SkillRef,
     Unsupported,
+    VersionProbe,
     WantedLink,
 )
 from ._common import (
     decode_text,
     encode_text,
+    find_binary,
+    parse_version,
     plan_whole_file_instructions,
     read_skill_dir,
     sha256_hex,
@@ -138,6 +140,8 @@ MCP_FILE = "mcp_config.json"
 SKILLS_MANIFEST = "skills.json"
 SKILLS_SUBDIR = "skills"
 BINARY = "agy"
+#: What `--version` prints, as measured: a bare `1.4.12`. A banner such as `agy 1.4.12` also reads.
+VERSION_BANNER = r"\bagy\s+v?(\d\S*)"
 
 #: Antigravity truncates a global rules file above this many bytes, silently [docs].
 INSTRUCTIONS_LIMIT = 24_000
@@ -559,6 +563,19 @@ def _listed_skills(manifest: _Manifest) -> list[SkillRef]:
 # -- the adapter ---------------------------------------------------------------------------------
 
 
+def install_dirs(env: Env) -> list[Path]:
+    """The default Windows install folder, `%LOCALAPPDATA%/agy/bin` [prototype], which the
+    installer does not always put on `PATH`."""
+    if env.platform != "windows":
+        return []
+    local = env.environ.get("LOCALAPPDATA")
+    return [(Path(local) if local else Path(env.home) / "AppData" / "Local") / "agy" / "bin"]
+
+
+def parse_version_output(output: str) -> str | None:
+    return parse_version(output, prefer=VERSION_BANNER)
+
+
 class AntigravityAdapter(ToolAdapter):
     id: ClassVar[str] = "agy"
     label: ClassVar[str] = "Antigravity"
@@ -568,18 +585,18 @@ class AntigravityAdapter(ToolAdapter):
 
     def detect(self, env: Env) -> Detection:
         root = gemini_dir(env)
-        found = shutil.which(BINARY, path=env.environ.get("PATH", ""))
-        binary = Path(found) if found else None
-        local = env.environ.get("LOCALAPPDATA")
-        if binary is None and env.platform == "windows" and local:
-            candidate = Path(local) / "agy" / "bin" / "agy.exe"  # [prototype] the default install
-            binary = candidate if candidate.is_file() else None
+        found = find_binary(env, BINARY, extra_dirs=install_dirs(env))
+        binary = found.path if found else None
         return Detection(
             installed=binary is not None or root.is_dir(),
             binary=binary,
+            binary_source=found.source if found else None,
             version=None,  # reading it would start the program; detect() must stay read-only
             config_roots=(root,),
         )
+
+    def version_probe(self, env: Env, binary: Path) -> VersionProbe | None:
+        return VersionProbe((str(binary), "--version"), parse_version_output)
 
     def paths(self, env: Env, scope: Scope) -> Paths:
         if scope is not Scope.GLOBAL:

@@ -4,7 +4,9 @@ Everything here is a pure planner or reader: nothing writes (docs/decisions/0008
 
 - the whole-file ownership rule for a tool's global instructions file;
 - the per-skill link planner and the skills-directory reader (docs/decisions/0007);
-- small helpers (`sha256_hex`, `is_absolute`, `decode_text` / `encode_text` for a text config).
+- small helpers (`sha256_hex`, `is_absolute`, `decode_text` / `encode_text` for a text config);
+- finding a tool's binary without starting it, and reading a version from command output
+  (docs/decisions/0014).
 
 Anything that depends on a tool's own format stays in that tool's module.
 """
@@ -13,7 +15,8 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Collection, Sequence
+import re
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -21,8 +24,11 @@ from ..engine import fsops
 from ..engine.errors import BackupError
 from ..model import (
     INSTRUCTIONS_KEY,
+    SOURCE_KNOWN_LOCATION,
+    SOURCE_PATH,
     Conflict,
     EditFile,
+    Env,
     ItemRef,
     Kind,
     Link,
@@ -179,3 +185,132 @@ def read_skill_dir(directory: Path | None, ignore: Collection[str] = ()) -> list
         for child in sorted(directory.iterdir())
         if child.is_dir() and child.name not in ignore
     ]
+
+
+# -- binaries and versions (docs/decisions/0014) -------------------------------------------------
+
+DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD"
+
+
+@dataclass(frozen=True)
+class BinaryMatch:
+    """A binary that exists, and how it was found (`SOURCE_PATH` or `SOURCE_KNOWN_LOCATION`)."""
+
+    path: Path
+    source: str
+
+
+def _environ_get(environ: Mapping[str, str], name: str, platform: str) -> str:
+    """One variable of `environ`. Windows names are case-insensitive (`Path` is `PATH`)."""
+    if name in environ:
+        return environ[name]
+    if platform == "windows":
+        wanted = name.casefold()
+        for key, value in environ.items():
+            if key.casefold() == wanted:
+                return value
+    return ""
+
+
+def path_dirs(env: Env) -> list[Path]:
+    """The folders of `PATH` in `env.environ`, in order. Empty and relative entries are skipped
+    (a relative one means the current folder, which an adapter must not depend on)."""
+    separator = ";" if env.platform == "windows" else ":"
+    out: list[Path] = []
+    for raw in _environ_get(env.environ, "PATH", env.platform).split(separator):
+        entry = raw.strip().strip('"') if env.platform == "windows" else raw
+        # absolute in the style of `env.platform`, or of the machine running this code (a test
+        # may label an Env "windows" while its temporary folders are POSIX paths)
+        absolute = bool(entry) and (is_absolute(entry, env.platform) or Path(entry).is_absolute())
+        if absolute and Path(entry) not in out:
+            out.append(Path(entry))
+    return out
+
+
+def known_bin_dirs(env: Env) -> list[Path]:
+    """Folders where a command line tool commonly lands but that may not be on `PATH`.
+
+    Derived from `env` only. Windows: the user's `.local/bin`, the npm global folder (`APPDATA/npm`)
+    and the app execution aliases (`LOCALAPPDATA/Microsoft/WindowsApps`). Linux and macOS:
+    `~/.local/bin`, `~/.npm-global/bin`, `~/.bun/bin`, `/usr/local/bin` and, on macOS, the Homebrew
+    folder. An adapter adds the folders of its own installer through `extra_dirs`.
+    """
+    home = Path(env.home)
+    if env.platform == "windows":
+        appdata = _environ_get(env.environ, "APPDATA", env.platform)
+        local = _environ_get(env.environ, "LOCALAPPDATA", env.platform)
+        roaming = Path(appdata) if appdata else home / "AppData" / "Roaming"
+        local_dir = Path(local) if local else home / "AppData" / "Local"
+        return [
+            home / ".local" / "bin",
+            roaming / "npm",
+            local_dir / "Microsoft" / "WindowsApps",
+        ]
+    dirs = [home / ".local" / "bin", home / ".npm-global" / "bin", home / ".bun" / "bin"]
+    dirs.append(Path("/usr/local/bin"))
+    if env.platform == "macos":
+        dirs.append(Path("/opt/homebrew/bin"))
+    return dirs
+
+
+def _is_launchable(path: Path, platform: str) -> bool:
+    try:
+        if not path.is_file():
+            return False
+        return platform == "windows" or os.access(path, os.X_OK)
+    except OSError:  # for example an unreadable app execution alias
+        return False
+
+
+def _candidates(directory: Path, name: str, env: Env) -> list[Path]:
+    if env.platform != "windows":
+        return [directory / name]
+    pathext = _environ_get(env.environ, "PATHEXT", env.platform) or DEFAULT_PATHEXT
+    exts = [e if e.startswith(".") else "." + e for e in pathext.split(";") if e.strip()]
+    out = []
+    for ext in exts:
+        for variant in (ext.lower(), ext):
+            candidate = directory / (name + variant)
+            if candidate not in out:
+                out.append(candidate)
+    return out
+
+
+def find_binary(env: Env, name: str, *, extra_dirs: Sequence[Path] = ()) -> BinaryMatch | None:
+    """Find `name` without starting anything: first on `PATH` of `env.environ`, then in the known
+    install folders (`known_bin_dirs` and `extra_dirs`). The OS and `os.environ` are not consulted.
+
+    On Windows the extensions come from `PATHEXT` of `env.environ` (default `.COM;.EXE;.BAT;.CMD`),
+    so a `.cmd` shim is found; the bare name never matches there (the extensionless script an npm
+    install leaves beside its shim cannot be run). On Linux and macOS the file must be executable.
+    """
+    on_path = path_dirs(env)
+    searches = [(directory, SOURCE_PATH) for directory in on_path]
+    for directory in (*known_bin_dirs(env), *extra_dirs):
+        if Path(directory) not in on_path:
+            searches.append((Path(directory), SOURCE_KNOWN_LOCATION))
+    for directory, source in searches:
+        for candidate in _candidates(directory, name, env):
+            if _is_launchable(candidate, env.platform):
+                return BinaryMatch(candidate, source)
+    return None
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_VERSION = re.compile(r"(?<![\w.])v?(\d+(?:\.\d+)+(?:[-+][0-9A-Za-z][0-9A-Za-z.+-]*)?)")
+
+
+def parse_version(output: str, *, prefer: str | None = None) -> str | None:
+    """The first version-looking token of `output`, without a leading `v` (`demo v2.2.6` is
+    `2.2.6`, `2.1.3 (Some Tool)` is `2.1.3`). A version has at least two numeric parts.
+
+    `prefer` is a regex with one group, tried first, for a tool whose banner also holds other
+    numbers; it falls back to the first token when the preferred shape is absent.
+    """
+    text = _ANSI.sub("", output)
+    if prefer:
+        match = re.search(prefer, text)
+        if match and match.group(1):
+            return parse_version(match.group(1))
+    match = _VERSION.search(text)
+    return match.group(1) if match else None

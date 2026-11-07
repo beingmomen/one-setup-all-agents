@@ -54,8 +54,10 @@ from ..model import (
     Scope,
     SkillRef,
     Unsupported,
+    VersionProbe,
     WantedLink,
 )
+from ._common import parse_version
 
 
 class ToolAdapter(ABC):
@@ -72,7 +74,20 @@ class ToolAdapter(ABC):
 
     @abstractmethod
     def detect(self, env: Env) -> Detection:
-        """Is the tool installed? Return its binary, version and config roots, per OS."""
+        """Is the tool installed? Return its binary (and where it was found), config roots and
+        warnings, per OS. Read-only: it never starts a program, so `version` stays None here;
+        `detect.detect_all` reads it through `version_probe`."""
+
+    def version_probe(self, env: Env, binary: Path) -> VersionProbe | None:
+        """How to read this tool's version, given the binary `detect` found. Pure: it only
+        DECLARES the command; it never runs it. `detect.detect_all` is the one place that does
+        (docs/decisions/0014).
+
+        Default: `<binary> --version`, read with the tolerant `parse_version`. An adapter
+        overrides it when its tool prints more than a bare version (to say which number is the
+        version), or returns None when reading the version would have a side effect.
+        """
+        return VersionProbe((str(binary), "--version"), parse_version)
 
     @abstractmethod
     def paths(self, env: Env, scope: Scope) -> Paths:

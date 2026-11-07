@@ -80,7 +80,6 @@ on Linux and macOS with a live tool, and anything on macOS at all (CI only).
 from __future__ import annotations
 
 import re
-import shutil
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -106,11 +105,14 @@ from ..model import (
     Scope,
     SkillRef,
     Unsupported,
+    VersionProbe,
 )
 from ._common import (
     decode_text,
     encode_text,
+    find_binary,
     is_absolute,
+    parse_version,
     plan_skill_links,
     plan_whole_file_instructions,
     read_skill_dir,
@@ -119,6 +121,9 @@ from ._common import (
 from .base import ToolAdapter
 
 CONFIG_HOME_ENV = "CODEX_HOME"
+BINARY = "codex"
+#: What `--version` prints, as measured: `codex-cli 0.146.0`.
+VERSION_BANNER = r"\bcodex-cli\s+v?(\d\S*)"
 DEFAULT_DIR = ".codex"
 CONFIG_FILE = "config.toml"
 INSTRUCTIONS_FILE = "AGENTS.md"
@@ -514,6 +519,10 @@ def _check_result(old_doc: dict, new_text: str, spec: _McpEdit) -> None:
 # -- the adapter ---------------------------------------------------------------------------------
 
 
+def parse_version_output(output: str) -> str | None:
+    return parse_version(output, prefer=VERSION_BANNER)
+
+
 class CodexAdapter(ToolAdapter):
     id: ClassVar[str] = "codex"
     label: ClassVar[str] = "Codex"
@@ -523,8 +532,8 @@ class CodexAdapter(ToolAdapter):
 
     def detect(self, env: Env) -> Detection:
         root = codex_home(env)
-        found = shutil.which("codex", path=env.environ.get("PATH", ""))
-        binary = Path(found) if found else None
+        found = find_binary(env, BINARY)
+        binary = found.path if found else None
         warnings = []
         bad = codex_home_warning(env)
         if bad:
@@ -542,10 +551,14 @@ class CodexAdapter(ToolAdapter):
         return Detection(
             installed=binary is not None or root.is_dir(),
             binary=binary,
+            binary_source=found.source if found else None,
             version=None,  # reading it would start the program; detect() must stay read-only
             config_roots=(root,),
             warnings=tuple(warnings),
         )
+
+    def version_probe(self, env: Env, binary: Path) -> VersionProbe | None:
+        return VersionProbe((str(binary), "--version"), parse_version_output)
 
     def paths(self, env: Env, scope: Scope) -> Paths:
         if scope is not Scope.GLOBAL:

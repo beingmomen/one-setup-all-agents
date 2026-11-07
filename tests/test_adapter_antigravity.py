@@ -173,7 +173,7 @@ class PathTests(Base):
         binary = bin_dir / ("agy.exe" if os.name == "nt" else "agy")
         binary.write_bytes(b"")
         binary.chmod(0o755)
-        env = self.make_env("linux", {"PATH": str(bin_dir)})
+        env = self.make_env("windows" if os.name == "nt" else "linux", {"PATH": str(bin_dir)})
         found = self.adapter.detect(env)
         self.assertTrue(found.installed)
         self.assertEqual(Path(found.binary).resolve(), binary.resolve())

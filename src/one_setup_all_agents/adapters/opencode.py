@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -70,11 +69,14 @@ from ..model import (
     Scope,
     SkillRef,
     Unsupported,
+    VersionProbe,
 )
 from ._common import (
     decode_text,
     encode_text,
+    find_binary,
     is_absolute,
+    parse_version,
     plan_skill_links,
     plan_whole_file_instructions,
     read_skill_dir,
@@ -83,6 +85,9 @@ from ._common import (
 from .base import ToolAdapter
 
 APP_DIR = "opencode"
+BINARY = "opencode"
+#: What `--version` prints, as measured: a bare `v2.2.5`. A banner like `opencode v2.2.5` reads too.
+VERSION_BANNER = r"\bopencode\s+v?(\d\S*)"
 INSTRUCTIONS_FILE = "AGENTS.md"
 CONFIG_FILES = ("opencode.jsonc", "opencode.json")  # first existing wins; the first is created
 SCHEMA_URL = "https://opencode.ai/config.json"
@@ -426,6 +431,16 @@ def _check_result(text: str, spec: _McpEdit) -> None:
 # -- the adapter ---------------------------------------------------------------------------------
 
 
+def install_dirs(env: Env) -> list[Path]:
+    """Where the installer script puts the binary, besides the folders every tool may use
+    (`~/.opencode/bin` [prototype: not measured on this OS])."""
+    return [Path(env.home) / ".opencode" / "bin"]
+
+
+def parse_version_output(output: str) -> str | None:
+    return parse_version(output, prefer=VERSION_BANNER)
+
+
 class OpenCodeAdapter(ToolAdapter):
     id: ClassVar[str] = "opencode"
     label: ClassVar[str] = "OpenCode"
@@ -435,14 +450,18 @@ class OpenCodeAdapter(ToolAdapter):
 
     def detect(self, env: Env) -> Detection:
         root = config_dir(env)
-        found = shutil.which("opencode", path=env.environ.get("PATH", ""))
-        binary = Path(found) if found else None
+        found = find_binary(env, BINARY, extra_dirs=install_dirs(env))
+        binary = found.path if found else None
         return Detection(
             installed=binary is not None or root.is_dir(),
             binary=binary,
+            binary_source=found.source if found else None,
             version=None,  # reading it would start the program; detect() must stay read-only
             config_roots=(root,),
         )
+
+    def version_probe(self, env: Env, binary: Path) -> VersionProbe | None:
+        return VersionProbe((str(binary), "--version"), parse_version_output)
 
     def paths(self, env: Env, scope: Scope) -> Paths:
         if scope is not Scope.GLOBAL:

@@ -86,7 +86,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -95,6 +94,8 @@ from typing import ClassVar
 
 from .._core.mask import env_value_looks_secret, mask_args, mask_text
 from ..model import (
+    SOURCE_OVERRIDE,
+    SOURCE_PATH,
     Conflict,
     Detection,
     Env,
@@ -110,9 +111,12 @@ from ..model import (
     Scope,
     SkillRef,
     Unsupported,
+    VersionProbe,
 )
 from ._common import (
+    find_binary,
     is_absolute,
+    parse_version,
     plan_skill_links,
     plan_whole_file_instructions,
     read_skill_dir,
@@ -122,6 +126,8 @@ from .base import ToolAdapter
 CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
 BIN_ENV = "ALL_AGENTS_CLAUDE_BIN"
 CLI_NAME = "claude"
+#: What `--version` prints, as measured: `2.1.310 (Claude Code)`.
+VERSION_BANNER = r"(\d[^\s()]*)\s+\(Claude Code\)"
 DEFAULT_DIR = ".claude"
 STATE_FILE = ".claude.json"
 INSTRUCTIONS_FILE = "CLAUDE.md"
@@ -180,21 +186,38 @@ def skills_dir(env: Env) -> Path:
     return config_dir(env) / SKILLS_DIR
 
 
-def find_cli(env: Env) -> tuple[str | None, Path | None, str | None]:
-    """(argv[0] to use, resolved binary, warning). The first two are None when it is not found.
+def locate_cli(env: Env) -> tuple[Path | None, str | None, str | None]:
+    """(binary, how it was found, warning). The first two are None when it is not found.
 
     `ALL_AGENTS_CLAUDE_BIN` wins and must name an existing file (a typo is reported, not replaced
-    by a different install found on PATH). Otherwise `PATH` from `env.environ` is searched and the
-    bare name is used, so the plan reads the same on every machine.
+    by a different install found on PATH). Otherwise the `PATH` of `env.environ` is searched, then
+    the known install folders (`~/.claude/local`, `~/.local/bin`, ...). Nothing is started.
     """
     override = env.environ.get(BIN_ENV)
     if override:
         path = Path(override)
         if path.is_file():
-            return str(path), path, None
+            return path, SOURCE_OVERRIDE, None
         return None, None, f"{BIN_ENV} points to a file that does not exist"
-    found = shutil.which(CLI_NAME, path=env.environ.get("PATH", ""))
-    return (CLI_NAME, Path(found), None) if found else (None, None, None)
+    found = find_binary(env, CLI_NAME, extra_dirs=[Path(env.home) / DEFAULT_DIR / "local"])
+    return (found.path, found.source, None) if found else (None, None, None)
+
+
+def find_cli(env: Env) -> tuple[str | None, Path | None, str | None]:
+    """(argv[0] to use, resolved binary, warning). The first two are None when it is not found.
+
+    A binary found on `PATH` is called by its bare name, so the plan reads the same on every
+    machine. One from the override or from a known install folder is called by its full path,
+    because the bare name would not resolve.
+    """
+    binary, source, warning = locate_cli(env)
+    if binary is None:
+        return None, None, warning
+    return (CLI_NAME if source == SOURCE_PATH else str(binary)), binary, warning
+
+
+def parse_version_output(output: str) -> str | None:
+    return parse_version(output, prefer=VERSION_BANNER)
 
 
 # -- reading .claude.json ----------------------------------------------------------------------
@@ -499,7 +522,7 @@ class ClaudeCodeAdapter(ToolAdapter):
 
     def detect(self, env: Env) -> Detection:
         root = config_dir(env)
-        _argv0, binary, bin_warning = find_cli(env)
+        binary, source, bin_warning = locate_cli(env)
         warnings = []
         value = env.environ.get(CONFIG_DIR_ENV)
         if value and config_override(env) is None:
@@ -515,10 +538,14 @@ class ClaudeCodeAdapter(ToolAdapter):
         return Detection(
             installed=binary is not None or configured,
             binary=binary,
+            binary_source=source,
             version=None,  # reading it would start the program; detect() must stay read-only
             config_roots=(root,),
             warnings=tuple(warnings),
         )
+
+    def version_probe(self, env: Env, binary: Path) -> VersionProbe | None:
+        return VersionProbe((str(binary), "--version"), parse_version_output)
 
     def paths(self, env: Env, scope: Scope) -> Paths:
         if scope is not Scope.GLOBAL:
