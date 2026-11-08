@@ -64,5 +64,5 @@ The binary is `ALL_AGENTS_CLAUDE_BIN` (a path, the prototype's variable; a path 
 
 - **A `RunCli` has no drift check (0010).** An entry changed by a session between the plan and the apply is removed and re-added from the planned view. The window is small; an `add` of a name that appeared meanwhile fails and is reverted.
 - **Unverified with a live tool:** Windows launcher names without `.cmd`, `CLAUDE_CONFIG_DIR`, symlinks on Linux and macOS, and everything on macOS.
-- The version of the `claude` CLI is not read (`detect()` must not start a program).
+- The version of the `claude` CLI is not read (`detect()` must not start a program). (Since 0014 the version IS read: the adapter declares `version_probe` and only `detect.py` runs it; `detect()` itself still starts no program.)
 - The secret-value refusal uses the project's heuristics, so an owned entry with a long opaque argument can be refused without holding a secret; the user then edits it by hand.

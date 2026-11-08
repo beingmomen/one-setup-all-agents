@@ -1,6 +1,6 @@
 # 0014: Tool detection and version probes
 
-Status: Proposed
+Status: Accepted (the maintainer accepted the recommendation on each open point)
 
 `init` and `status` need to know, for each registered tool, whether it is installed, where its binary is, which version it is and where its config lives, on Windows, Linux and macOS. The adapters already had a `detect()` that finds the binary and the config root without starting a program (0008, 0011 to 0013) and left `version` empty. This ADR fills the gap without breaking the boundary of 0008. It adds no rule to 0005 to 0013 and changes none. Facts marked [measured] come from running the tools' `--version` on the maintainer's Windows machine (the version strings in the legacy research notes); [unverified] were not checked against a live tool.
 
