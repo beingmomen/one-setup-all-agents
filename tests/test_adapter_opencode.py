@@ -183,6 +183,12 @@ class PathTests(Base):
         self.assertEqual(found.config_roots, (base,))
         self.assertIsNone(found.version)  # detect never starts a program
 
+    def test_detect_warns_on_unmanaged_skills_dir(self):
+        skills = self.env.home / ".config" / "opencode" / "skills"
+        skills.mkdir(parents=True)
+        found = self.adapter.detect(self.env)
+        self.assertIn("~/.config/opencode/skills exists and is not managed", found.warnings)
+
     def test_project_scope_is_unsupported_everywhere(self):
         self.assertEqual(self.adapter.paths(self.env, Scope.PROJECT).mcp, None)
         self.assertEqual(self.adapter.read_mcp(self.env, Scope.PROJECT), {})
@@ -626,6 +632,16 @@ class McpUnsupportedTests(Base):
         ops = self.plan_mcp({"s": McpServer(name="s")})
         self.assertEqual([type(o) for o in ops], [Unsupported])
         self.assertIn("s", self.doc()["mcp"]["servers"])
+
+    def test_import_notes_finds_secret_env_and_headers(self):
+        self.write_config(
+            '{"mcp": {"srv": {"type": "local", "command": ["c"], "environment": {"TOKEN": "sk-placeholder-secret-token-val"}}}}'
+        )
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0].server, "srv")
+        self.assertEqual(notes[0].field, "env")
+        self.assertEqual(notes[0].name, "TOKEN")
 
 
 class UnreadableConfigTests(Base):

@@ -22,6 +22,7 @@ adapters' source of truth; it only runs the ops it is given.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from pathlib import Path
 
 from .._core.mask import mask_args, mask_text
@@ -70,13 +71,21 @@ def _validate(ops: list) -> None:
 class _Run:
     """The state of one apply run: the open operation, the runner and the working ownership."""
 
-    def __init__(self, env: Env, op: journal.Operation, runner: Runner) -> None:
+    def __init__(
+        self,
+        env: Env,
+        op: journal.Operation,
+        runner: Runner,
+        adopt: Sequence[ItemRef] = (),
+    ) -> None:
         self.env = env
         self.state_dir = env.state_dir
         self.op = op
         self.runner = runner
         self.initial_owned = journal.owned_items(env.state_dir)
         self.owned = set(self.initial_owned)
+        for ref in adopt:
+            self.owned.add((ref.tool, ref.kind.value, ref.key))
 
     # -- shared pieces ---------------------------------------------------------------------
 
@@ -136,7 +145,7 @@ class _Run:
             new = op.transform(old)
             if not isinstance(new, bytes):
                 raise EngineError(f"the transform for {real.name} must return bytes")
-            mode = before.get("mode", 0o600 if op.sensitive else None)
+            mode = before.get("mode", op.mode or (0o600 if op.sensitive else None))
             expected = {"state": "file", "sha256": _sha256(new), "mode": mode}
             entry["after"] = expected
             entry["created_dirs"] = [str(p) for p in fsops.missing_ancestors(real)]
@@ -148,7 +157,9 @@ class _Run:
             fsops.make_dirs(real.parent)
             if expected["sha256"] != current_sha:
                 try:
-                    atomic_write(real, new, sensitive=op.sensitive, expect_sha256=op.expect_sha256)
+                    atomic_write(
+                        real, new, sensitive=op.sensitive, mode=mode, expect_sha256=op.expect_sha256
+                    )
                 except Exception:
                     # a refused or failed atomic write leaves the target as it was (ADR 0006)
                     entry["effect"] = "none"
@@ -237,33 +248,40 @@ def apply_plan(
     plan: Plan,
     *,
     label: str,
+    adopt: Sequence[ItemRef] = (),
     run_cli: Runner | None = None,
     lock_timeout: float = 0.0,
 ) -> str | None:
     """Execute `plan` and return the id of the journal operation that records it.
 
-    Returns None, and records nothing, when the plan has nothing to execute. Raises:
-    `EngineLockedError` if another run holds the lock, `OpenOperationError` if an earlier run is
-    unfinished, `PlanError` for a plan that cannot run, and `ApplyError` if an op failed (the
-    entries already done were reverted; `ApplyError.reverted` says whether that finished).
+    Returns None, and records nothing, when the plan has nothing to execute and no items to
+    adopt. Raises: `EngineLockedError` if another run holds the lock, `OpenOperationError` if an
+    earlier run is unfinished, `PlanError` for a plan that cannot run, and `ApplyError` if an op
+    failed (the entries already done were reverted; `ApplyError.reverted` says whether that
+    finished).
     """
     ops = plan.executable
-    if not ops:
+    if not ops and not adopt:
         return None
-    _validate(ops)
+    if ops:
+        _validate(ops)
     runner = run_cli or default_runner(env)
     with engine_lock(env.state_dir, timeout=lock_timeout):
         unfinished = journal.find_unfinished(env.state_dir)
         if unfinished:
             raise OpenOperationError(unfinished)
         op = journal.begin(env.state_dir, label)
-        run = _Run(env, op, runner)
+        run = _Run(env, op, runner, adopt=adopt)
         try:
             for item in ops:
                 run.execute(item)
             run.finish()
         except BaseException as exc:
             _fail_run(env, op, runner, exc)
+        try:
+            journal.prune(env.state_dir)
+        except OSError:
+            pass
         return op.id
 
 
@@ -293,6 +311,15 @@ def _fail_run(env: Env, op: journal.Operation, runner: Runner, exc: BaseExceptio
     ) from exc
 
 
+def recover_locked(env: Env, runner: Runner) -> list[str]:
+    """Put right every unfinished operation for a caller that already holds the lock."""
+    recovered = []
+    for op_id in reversed(journal.find_unfinished(env.state_dir)):
+        revert_locked(env, journal.load(env.state_dir, op_id), runner)
+        recovered.append(op_id)
+    return recovered
+
+
 def recover_operation(
     env: Env, *, run_cli: Runner | None = None, lock_timeout: float = 0.0
 ) -> list[str]:
@@ -303,9 +330,5 @@ def recover_operation(
     operation and `RevertError` is raised, naming the paths. Nothing to recover returns [].
     """
     runner = run_cli or default_runner(env)
-    recovered = []
     with engine_lock(env.state_dir, timeout=lock_timeout):
-        for op_id in reversed(journal.find_unfinished(env.state_dir)):
-            revert_locked(env, journal.load(env.state_dir, op_id), runner)
-            recovered.append(op_id)
-    return recovered
+        return recover_locked(env, runner)

@@ -431,15 +431,29 @@ class AdapterContract:
                 d = h.desired()
                 for desired in (d, h.changed(d), h.reduced(d)):
                     plan = h.plan(desired)
+                    snapshot_paths = set(h.adapter.snapshot_files(h.env, Scope.GLOBAL))
                     for op in plan.executable:
                         self.assertTrue(op.description, "an op has no description")
                         if isinstance(op, EditFile):
                             self.assertTrue(is_under(op.path, h.env.home), f"{op.path} is outside")
+                            self.assertIn(
+                                Path(op.path),
+                                snapshot_paths,
+                                f"{op.path} planned for edit is not in snapshot_files",
+                            )
                             on_disk = Path(op.path)
                             want = sha256_of(on_disk.read_bytes()) if on_disk.is_file() else None
                             self.assertEqual(
                                 op.expect_sha256, want, f"stale expect_sha256 for {op.path}"
                             )
+                        if isinstance(op, RunCli):
+                            mcp_path = h.adapter.paths(h.env, Scope.GLOBAL).mcp
+                            if mcp_path is not None:
+                                self.assertIn(
+                                    Path(mcp_path),
+                                    snapshot_paths,
+                                    f"MCP path {mcp_path} for RunCli is not in snapshot_files",
+                                )
                         if isinstance(op, Link):
                             self.assertTrue(is_under(op.link, h.env.home), f"{op.link} is outside")
                     h.sync(desired)

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ._core import jsonc
-from ._core.mask import env_value_looks_secret, mask_text
+from ._core.mask import env_value_looks_secret, mask_args, mask_text
 from .engine.plan import DesiredState
 from .model import HeaderRef, McpServer, SkillRef
 
@@ -195,11 +195,10 @@ def load_source(config_dir: Path, adapter_ids: Sequence[str]) -> SourceConfig:
                     raise SourceError(
                         f"server '{sname}' field looks like a secret; use an environment variable"
                     )
-            for a in args:
-                if mask_text(str(a)) != str(a):
-                    raise SourceError(
-                        f"server '{sname}' args look like a secret; use an environment variable"
-                    )
+            if mask_args(list(args)) != [str(a) for a in args]:
+                raise SourceError(
+                    f"server '{sname}' args look like a secret; use an environment variable"
+                )
 
             raw_env = sdata.get("env", {})
             if not isinstance(raw_env, dict):
@@ -218,10 +217,11 @@ def load_source(config_dir: Path, adapter_ids: Sequence[str]) -> SourceConfig:
             if not isinstance(raw_env_vars, (list, tuple)):
                 raise SourceError(f"'env_vars' in server '{sname}' must be a list of strings")
             env_vars_list = []
-            for evar in raw_env_vars:
+            for i, evar in enumerate(raw_env_vars, 1):
                 if not isinstance(evar, str) or not _ENV_VAR_NAME_RE.match(evar):
                     raise SourceError(
-                        f"invalid environment variable name '{evar}' in server '{sname}' env_vars"
+                        f"env_vars entry #{i} in server '{sname}' "
+                        "is not a valid environment variable name"
                     )
                 env_vars_list.append(evar)
 

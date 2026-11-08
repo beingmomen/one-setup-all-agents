@@ -37,7 +37,16 @@ class JournalTests(EngineCase):
         self.assertEqual(ledger["owned"], {})
         self.assertEqual(
             ledger["operations"],
-            [{"id": op.id, "label": "first", "created": "2026-11-06T10:15:00Z", "status": "open"}],
+            [
+                {
+                    "id": op.id,
+                    "label": "first",
+                    "created": "2026-11-06T10:15:00Z",
+                    "status": "open",
+                    "kind": "apply",
+                    "undoes": None,
+                }
+            ],
         )
 
     def test_ids_are_unique_even_with_a_frozen_clock(self):
@@ -146,6 +155,55 @@ class OwnedTests(EngineCase):
         clean.set_status("failed", pending_revert=False)
         self.assertEqual(set(journal.find_unfinished(self.state)), {crashed.id, half.id})
         self.assertEqual(journal.find_unfinished(self.root / "nowhere"), [])
+
+
+class JournalKindAndUndoableTests(EngineCase):
+    def test_begin_records_kind_and_undoes_in_journal_and_index(self):
+        op1 = journal.begin(self.state, "normal-apply", now=CLOCK)
+        self.assertEqual(op1.kind, "apply")
+        self.assertIsNone(op1.undoes)
+
+        op2 = journal.begin(self.state, "undo-op", kind="undo", undoes=op1.id, now=CLOCK)
+        self.assertEqual(op2.kind, "undo")
+        self.assertEqual(op2.undoes, op1.id)
+
+        loaded1 = journal.load(self.state, op1.id)
+        self.assertEqual(loaded1.kind, "apply")
+        self.assertIsNone(loaded1.undoes)
+
+        loaded2 = journal.load(self.state, op2.id)
+        self.assertEqual(loaded2.kind, "undo")
+        self.assertEqual(loaded2.undoes, op1.id)
+
+        ledger = journal.read_ledger(self.state)
+        op_by_id = {o["id"]: o for o in ledger["operations"]}
+        self.assertEqual(op_by_id[op1.id]["kind"], "apply")
+        self.assertIsNone(op_by_id[op1.id]["undoes"])
+        self.assertEqual(op_by_id[op2.id]["kind"], "undo")
+        self.assertEqual(op_by_id[op2.id]["undoes"], op1.id)
+
+    def test_list_undoable_returns_done_and_non_undo_newest_first(self):
+        self.assertEqual(journal.list_undoable(self.state), [])
+
+        t1 = datetime(2026, 11, 6, 10, 0, 0, tzinfo=timezone.utc)
+        t2 = datetime(2026, 11, 6, 11, 0, 0, tzinfo=timezone.utc)
+        t3 = datetime(2026, 11, 6, 12, 0, 0, tzinfo=timezone.utc)
+        t4 = datetime(2026, 11, 6, 13, 0, 0, tzinfo=timezone.utc)
+
+        op1 = journal.begin(self.state, "op1", now=t1)
+        op1.set_status(journal.DONE)
+
+        op2 = journal.begin(self.state, "op2", now=t2)
+        op2.set_status(journal.FAILED)
+
+        op3 = journal.begin(self.state, "op3", now=t3)
+        op3.set_status(journal.DONE)
+
+        op4 = journal.begin(self.state, "undo-op3", kind="undo", undoes=op3.id, now=t4)
+        op4.set_status(journal.DONE)
+
+        undoable = journal.list_undoable(self.state)
+        self.assertEqual([o["id"] for o in undoable], [op3.id, op1.id])
 
 
 if __name__ == "__main__":

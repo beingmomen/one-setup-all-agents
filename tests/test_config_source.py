@@ -256,7 +256,58 @@ class ConfigSourceTests(unittest.TestCase):
         (self.config_dir / MCP_NAME).write_text(mcp_content, encoding="utf-8")
         with self.assertRaises(SourceError) as ctx:
             load_source(self.config_dir, self.adapter_ids)
-        self.assertIn("invalid environment variable name", str(ctx.exception))
+        self.assertIn("is not a valid environment variable name", str(ctx.exception))
+
+    def test_leak1_env_vars_invalid_name_does_not_leak_secret(self):
+        fake = "sk-" + "a1" * 20
+        (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        mcp_content = f"""{{
+            "version": 1,
+            "servers": {{
+                "s1": {{
+                    "command": "demo",
+                    "env_vars": ["{fake}"]
+                }}
+            }}
+        }}"""
+        (self.config_dir / MCP_NAME).write_text(mcp_content, encoding="utf-8")
+        with self.assertRaises(SourceError) as ctx:
+            load_source(self.config_dir, self.adapter_ids)
+        self.assertNotIn(fake, str(ctx.exception))
+        self.assertIn("env_vars entry #1", str(ctx.exception))
+
+    def test_leak2_args_flag_plus_literal_secret_refused(self):
+        fake = "plainSecretValue12345"
+        (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        mcp_content = f"""{{
+            "version": 1,
+            "servers": {{
+                "s1": {{
+                    "command": "demo",
+                    "args": ["--api-key", "{fake}"]
+                }}
+            }}
+        }}"""
+        (self.config_dir / MCP_NAME).write_text(mcp_content, encoding="utf-8")
+        with self.assertRaises(SourceError) as ctx:
+            load_source(self.config_dir, self.adapter_ids)
+        self.assertNotIn(fake, str(ctx.exception))
+        self.assertIn("args look like a secret", str(ctx.exception))
+
+    def test_leak2_args_flag_plus_env_var_accepted(self):
+        (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        mcp_content = """{
+            "version": 1,
+            "servers": {
+                "s1": {
+                    "command": "demo",
+                    "args": ["--api-key", "${API_KEY}"]
+                }
+            }
+        }"""
+        (self.config_dir / MCP_NAME).write_text(mcp_content, encoding="utf-8")
+        cfg = load_source(self.config_dir, self.adapter_ids)
+        self.assertEqual(cfg.servers["s1"].server.args, ("--api-key", "${API_KEY}"))
 
     def test_bom_and_crlf_handling(self):
         crlf_toml = "\ufeffversion = 1\r\n[tools.example]\r\nenabled = true\r\n"

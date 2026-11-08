@@ -95,6 +95,7 @@ from ..model import (
     EditFile,
     Env,
     HeaderRef,
+    ImportNote,
     Instructions,
     ItemRef,
     Kind,
@@ -118,7 +119,7 @@ from ._common import (
     read_skill_dir,
     sha256_hex,
 )
-from .base import ToolAdapter
+from .base import ConfigUnreadable, ToolAdapter
 
 CONFIG_HOME_ENV = "CODEX_HOME"
 BINARY = "codex"
@@ -153,10 +154,6 @@ _VAR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _HEADER_NAME = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
 #: What `codex mcp add` accepts as a server name [docs: `validate_server_name`].
 _SERVER_NAME = re.compile(r"^[A-Za-z0-9_:@/.-]+$")
-
-
-class ConfigUnreadable(ValueError):
-    """The Codex config file exists but cannot be understood. Never overwritten."""
 
 
 # -- paths -------------------------------------------------------------------------------------
@@ -588,6 +585,45 @@ class CodexAdapter(ToolAdapter):
             for name, entry in config.servers.items()
             if _entry_shaped(entry)
         }
+
+    def import_notes(self, env: Env, scope: Scope = Scope.GLOBAL) -> list[ImportNote]:
+        path = self.paths(env, scope).mcp
+        if path is None or not path.is_file():
+            return []
+        try:
+            config = load_config(path)
+        except ConfigUnreadable:
+            return []
+        notes: list[ImportNote] = []
+        for name, entry in sorted(config.servers.items()):
+            if not isinstance(entry, Mapping):
+                continue
+            http_headers = entry.get("http_headers")
+            if isinstance(http_headers, Mapping):
+                for key in sorted(http_headers.keys()):
+                    notes.append(
+                        ImportNote(
+                            tool=self.id,
+                            server=name,
+                            field="header",
+                            name=str(key),
+                        )
+                    )
+            passed = _names(entry.get("env_vars"))
+            env_map = entry.get("env")
+            if isinstance(env_map, Mapping):
+                for key, value in sorted(env_map.items()):
+                    if isinstance(value, str) and key not in passed:
+                        if env_value_looks_secret(str(key), value):
+                            notes.append(
+                                ImportNote(
+                                    tool=self.id,
+                                    server=name,
+                                    field="env",
+                                    name=str(key),
+                                )
+                            )
+        return notes
 
     def read_skills(self, env: Env, scope: Scope) -> list[SkillRef]:
         return read_skill_dir(self.paths(env, scope).skills_dir)

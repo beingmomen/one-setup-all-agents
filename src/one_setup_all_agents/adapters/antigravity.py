@@ -108,6 +108,7 @@ from ..model import (
     Detection,
     EditFile,
     Env,
+    ImportNote,
     Instructions,
     ItemRef,
     Kind,
@@ -131,7 +132,7 @@ from ._common import (
     sha256_hex,
     skill_problem,
 )
-from .base import ToolAdapter
+from .base import ConfigUnreadable, ToolAdapter
 
 HOME_DIR = ".gemini"
 CONFIG_SUBDIR = "config"
@@ -156,11 +157,7 @@ _OWNED_KEYS = frozenset(
 )
 
 
-class ConfigUnreadable(ValueError):
-    """`mcp_config.json` exists but cannot be understood. Never overwritten."""
-
-
-class ManifestUnreadable(ValueError):
+class ManifestUnreadable(ConfigUnreadable):
     """`skills.json` exists but cannot be understood or safely edited. Never overwritten."""
 
 
@@ -587,12 +584,25 @@ class AntigravityAdapter(ToolAdapter):
         root = gemini_dir(env)
         found = find_binary(env, BINARY, extra_dirs=install_dirs(env))
         binary = found.path if found else None
+        warnings: list[str] = []
+        extra_instruction_files = (
+            (env.home / ".gemini" / "AGENTS.md", "~/.gemini/AGENTS.md"),
+            (env.home / ".gemini" / "config" / "AGENTS.md", "~/.gemini/config/AGENTS.md"),
+            (env.home / ".gemini" / "config" / "GEMINI.md", "~/.gemini/config/GEMINI.md"),
+        )
+        for real_path, display_path in extra_instruction_files:
+            if real_path.is_file():
+                warnings.append(
+                    f"{display_path} also read by the tool; not managed; "
+                    "the rules would apply twice"
+                )
         return Detection(
             installed=binary is not None or root.is_dir(),
             binary=binary,
             binary_source=found.source if found else None,
             version=None,  # reading it would start the program; detect() must stay read-only
             config_roots=(root,),
+            warnings=tuple(warnings),
         )
 
     def version_probe(self, env: Env, binary: Path) -> VersionProbe | None:
@@ -626,6 +636,50 @@ class AntigravityAdapter(ToolAdapter):
             for name, entry in config.members.items()
             if _entry_shaped(entry)
         }
+
+    def import_notes(self, env: Env, scope: Scope = Scope.GLOBAL) -> list[ImportNote]:
+        path = self.paths(env, scope).mcp
+        if path is None or not path.is_file():
+            return []
+        try:
+            config = load_config(path)
+        except ConfigUnreadable:
+            return []
+        notes: list[ImportNote] = []
+        for name, entry in sorted(config.members.items()):
+            if not isinstance(entry, Mapping):
+                continue
+            raw_headers = entry.get("headers")
+            if isinstance(raw_headers, Mapping):
+                for key in sorted(raw_headers.keys()):
+                    notes.append(
+                        ImportNote(
+                            tool=self.id,
+                            server=name,
+                            field="header",
+                            name=str(key),
+                        )
+                    )
+            environment = entry.get("env")
+            if isinstance(environment, Mapping):
+                for key, value in sorted(environment.items()):
+                    if isinstance(value, str) and env_value_looks_secret(str(key), value):
+                        notes.append(
+                            ImportNote(
+                                tool=self.id,
+                                server=name,
+                                field="env",
+                                name=str(key),
+                            )
+                        )
+        return notes
+
+    def snapshot_files(self, env: Env, scope: Scope = Scope.GLOBAL) -> tuple[Path, ...]:
+        paths = list(super().snapshot_files(env, scope))
+        manifest = skills_manifest(env)
+        if manifest is not None and manifest not in paths:
+            paths.append(manifest)
+        return tuple(paths)
 
     def read_skills(self, env: Env, scope: Scope) -> list[SkillRef]:
         """Skills in the folder agy reads by itself, plus those the manifest names. Raises

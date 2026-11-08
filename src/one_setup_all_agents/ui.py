@@ -12,9 +12,14 @@ from .context import CommandContext
 from .detect import mask_home
 
 
+def _mask_multiline(text: str, ctx: CommandContext) -> str:
+    """Mask secrets and home paths line by line to handle anchored tokens."""
+    return "\n".join(mask_home(mask_text(line), ctx.env) for line in text.split("\n"))
+
+
 def say(ctx: CommandContext, text: str) -> None:
     """Print an informational line to ctx.out with secrets and home paths masked."""
-    masked = mask_home(mask_text(text), ctx.env)
+    masked = _mask_multiline(text, ctx)
     if not masked.endswith("\n"):
         masked += "\n"
     ctx.out.write(masked)
@@ -23,7 +28,7 @@ def say(ctx: CommandContext, text: str) -> None:
 
 def warn(ctx: CommandContext, text: str) -> None:
     """Print a warning line to ctx.err with secrets and home paths masked."""
-    masked = mask_home(mask_text(text), ctx.env)
+    masked = _mask_multiline(text, ctx)
     if not masked.endswith("\n"):
         masked += "\n"
     ctx.err.write(masked)

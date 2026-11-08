@@ -19,3 +19,6 @@ Short ADRs. Each one gives the decision, the reason and the open points. Status 
 | [0013](0013-antigravity-adapter.md) | Antigravity adapter | Accepted |
 | [0014](0014-tool-detection.md) | Tool detection and version probes | Accepted |
 | [0015](0015-source-layout-v1.md) | Source layout v1 | Proposed |
+| [0016](0016-unknown-formats-are-refused.md) | Unknown formats are refused | Proposed |
+| [0017](0017-init-import-adoption-snapshot.md) | Init, import, adoption, and safety snapshots | Proposed |
+| [0018](0018-commands-sync-status-undo.md) | Commands v1 (sync, status, undo) | Proposed |

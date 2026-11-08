@@ -5,6 +5,8 @@ import hashlib
 import io
 import json
 import os
+import stat
+import sys
 import unittest
 from unittest import mock
 
@@ -56,8 +58,8 @@ class ApplyCase(EngineCase):
     def apply(self, *ops, runner=None, label="test"):
         return apply_plan(self.env, Plan(list(ops)), label=label, run_cli=runner or FakeRunner())
 
-    def revert(self, op_id, runner=None):
-        return revert_operation(self.env, op_id, run_cli=runner or FakeRunner())
+    def revert(self, op_id, runner=None, force=False):
+        return revert_operation(self.env, op_id, force=force, run_cli=runner or FakeRunner())
 
     def entries(self, op_id):
         return journal.load(self.state, op_id).entries
@@ -541,6 +543,60 @@ class RevertTests(ApplyCase):
         self.assertEqual(ctx.exception.drifted, [a])
         self.assertFalse(a.exists())
 
+    def test_revert_with_force_restores_drifted_modified_deleted_and_repointed_link(self):
+        a = self.write(self.home / "a.txt", b"a-old")
+        target1 = self.home / "target1_dir"
+        target1.mkdir()
+        target2 = self.home / "target2_dir"
+        target2.mkdir()
+        link = self.home / "my_link_dir"
+
+        op_id = self.apply(
+            self.edit(a, b"a-new"),
+            Link(link, target1, "my link"),
+        )
+
+        # 1. Drift: modify a.txt, repoint link to target2
+        a.write_bytes(b"a-tampered")
+        fsops.remove_link(link)
+        fsops.create_dir_link(link, target2)
+
+        # Without force: refused
+        with self.assertRaises(RevertError) as ctx:
+            self.revert(op_id)
+        self.assertIn(a, ctx.exception.drifted)
+        self.assertIn(link, ctx.exception.drifted)
+
+        # With force: restores both
+        report = self.revert(op_id, force=True)
+        self.assertIn(1, report.reverted)
+        self.assertEqual(a.read_bytes(), b"a-old")
+        self.assertFalse(link.exists())
+
+        # 2. Test deleted file restored with force
+        op_id2 = self.apply(self.edit(a, b"a-newer"))
+        a.unlink()
+        with self.assertRaises(RevertError):
+            self.revert(op_id2)
+        self.revert(op_id2, force=True)
+        self.assertTrue(a.exists())
+        self.assertEqual(a.read_bytes(), b"a-old")
+
+    def test_apply_plan_prunes_journal_keeping_last_20_operations(self):
+        from datetime import datetime, timezone
+
+        for i in range(25):
+            t = datetime(2026, 11, 6, 10, i, 0, tzinfo=timezone.utc)
+            op = journal.begin(self.state, f"dummy-{i}", now=t)
+            op.set_status(journal.DONE)
+
+        a = self.write(self.home / "apply_prune.txt", b"start")
+        self.apply(self.edit(a, b"finish"))
+
+        # After apply, pruning kept at most 20 operations
+        ops = journal.list_operations(self.state)
+        self.assertEqual(len(ops), 20)
+
     def test_a_permission_change_counts_as_drift_on_posix(self):
         if not POSIX:
             self.skipTest("permission bits are a POSIX concept")
@@ -696,6 +752,105 @@ def recover_operation_report(case, runner):
 
     (op_id,) = journal.find_unfinished(case.state)
     return revert(case.env, op_id, run_cli=runner)
+
+
+class AdoptionCarrierTests(ApplyCase):
+    def test_adoption_only_plan_creates_done_operation_with_delta(self):
+        op_id = apply_plan(
+            self.env,
+            Plan([]),
+            label="test_adopt",
+            adopt=(MCP, SKILL),
+            run_cli=FakeRunner(),
+        )
+        self.assertIsNotNone(op_id)
+        op = journal.load(self.state, op_id)
+        self.assertEqual(op.status, journal.DONE)
+        self.assertEqual(len(op.entries), 0)
+        delta = op.data.get("owned_delta", {})
+        added = delta.get("added", [])
+        expected_added = sorted(
+            [
+                [MCP.tool, MCP.kind.value, MCP.key],
+                [SKILL.tool, SKILL.kind.value, SKILL.key],
+            ]
+        )
+        self.assertEqual(sorted(added), expected_added)
+        owned = journal.owned_items(self.state)
+        self.assertIn((MCP.tool, MCP.kind.value, MCP.key), owned)
+        self.assertIn((SKILL.tool, SKILL.kind.value, SKILL.key), owned)
+
+    def test_revert_removes_adopted_items(self):
+        op_id = apply_plan(
+            self.env,
+            Plan([]),
+            label="test_adopt",
+            adopt=(MCP,),
+            run_cli=FakeRunner(),
+        )
+        self.assertIn((MCP.tool, MCP.kind.value, MCP.key), journal.owned_items(self.state))
+        report = revert_operation(self.env, op_id, run_cli=FakeRunner())
+        self.assertEqual(report.op_id, op_id)
+        self.assertNotIn((MCP.tool, MCP.kind.value, MCP.key), journal.owned_items(self.state))
+        op = journal.load(self.state, op_id)
+        self.assertEqual(op.status, journal.UNDONE)
+
+    def test_already_owned_item_not_duplicated_and_survives_revert(self):
+        journal.set_owned(self.state, MCP.tool, MCP.kind.value, [MCP.key])
+        self.assertIn((MCP.tool, MCP.kind.value, MCP.key), journal.owned_items(self.state))
+
+        op_id = apply_plan(
+            self.env,
+            Plan([]),
+            label="test_adopt_mixed",
+            adopt=(MCP, SKILL),
+            run_cli=FakeRunner(),
+        )
+        op = journal.load(self.state, op_id)
+        added = op.data.get("owned_delta", {}).get("added", [])
+        self.assertEqual(added, [[SKILL.tool, SKILL.kind.value, SKILL.key]])
+
+        revert_operation(self.env, op_id, run_cli=FakeRunner())
+        owned = journal.owned_items(self.state)
+        self.assertIn((MCP.tool, MCP.kind.value, MCP.key), owned)
+        self.assertNotIn((SKILL.tool, SKILL.kind.value, SKILL.key), owned)
+
+    def test_failing_op_in_plan_reverts_adoption_too(self):
+        with self.assertRaises(ApplyError):
+            apply_plan(
+                self.env,
+                Plan([self.edit(self.home / "fail.txt", b"new", expect="wrong_hash")]),
+                label="test_fail",
+                adopt=(MCP,),
+                run_cli=FakeRunner(),
+            )
+        owned = journal.owned_items(self.state)
+        self.assertNotIn((MCP.tool, MCP.kind.value, MCP.key), owned)
+
+    @unittest.skipUnless(sys.platform != "win32", "permission bits are a POSIX concept")
+    def test_edit_file_honors_mode_for_new_file(self):
+        dest = self.home / "run.sh"
+        op = EditFile(
+            path=dest,
+            transform=lambda _old: b"#!/bin/sh\n",
+            expect_sha256=None,
+            description="create script",
+            mode=0o755,
+        )
+        apply_plan(self.env, Plan([op]), label="mode_test", run_cli=FakeRunner())
+        self.assertEqual(stat.S_IMODE(dest.stat().st_mode), 0o755)
+
+    def test_edit_file_mode_accepted_on_all_platforms(self):
+        dest = self.home / "any.sh"
+        op = EditFile(
+            path=dest,
+            transform=lambda _old: b"hello",
+            expect_sha256=None,
+            description="create script",
+            mode=0o755,
+        )
+        apply_plan(self.env, Plan([op]), label="mode_test", run_cli=FakeRunner())
+        self.assertEqual(dest.read_bytes(), b"hello")
 
 
 if __name__ == "__main__":

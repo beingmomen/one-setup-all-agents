@@ -59,6 +59,7 @@ from ..model import (
     EditFile,
     Env,
     HeaderRef,
+    ImportNote,
     Instructions,
     ItemRef,
     Kind,
@@ -82,7 +83,7 @@ from ._common import (
     read_skill_dir,
     sha256_hex,
 )
-from .base import ToolAdapter
+from .base import ConfigUnreadable, ToolAdapter
 
 APP_DIR = "opencode"
 BINARY = "opencode"
@@ -109,10 +110,6 @@ _ENV_REF = re.compile(r"^\{env:([A-Za-z_][A-Za-z0-9_]*)\}$")
 _HEADER_REF = re.compile(
     r"^(?:(?P<scheme>[A-Za-z][A-Za-z0-9._-]*) )?\{env:(?P<var>[A-Za-z_][A-Za-z0-9_]*)\}$"
 )
-
-
-class ConfigUnreadable(ValueError):
-    """The OpenCode config file exists but cannot be understood. Never overwritten."""
 
 
 # -- paths -------------------------------------------------------------------------------------
@@ -452,12 +449,16 @@ class OpenCodeAdapter(ToolAdapter):
         root = config_dir(env)
         found = find_binary(env, BINARY, extra_dirs=install_dirs(env))
         binary = found.path if found else None
+        warnings: list[str] = []
+        if (env.home / ".config" / "opencode" / "skills").is_dir():
+            warnings.append("~/.config/opencode/skills exists and is not managed")
         return Detection(
             installed=binary is not None or root.is_dir(),
             binary=binary,
             binary_source=found.source if found else None,
             version=None,  # reading it would start the program; detect() must stay read-only
             config_roots=(root,),
+            warnings=tuple(warnings),
         )
 
     def version_probe(self, env: Env, binary: Path) -> VersionProbe | None:
@@ -491,6 +492,52 @@ class OpenCodeAdapter(ToolAdapter):
             for name, entry in config.members.items()
             if _entry_shaped(entry)
         }
+
+    def import_notes(self, env: Env, scope: Scope = Scope.GLOBAL) -> list[ImportNote]:
+        path = self.paths(env, scope).mcp
+        if path is None or not path.is_file():
+            return []
+        try:
+            config = load_config(path)
+        except ConfigUnreadable:
+            return []
+        notes: list[ImportNote] = []
+        for name, entry in sorted(config.members.items()):
+            if not isinstance(entry, Mapping):
+                continue
+            raw_headers = entry.get("headers")
+            if isinstance(raw_headers, Mapping):
+                for key, value in sorted(raw_headers.items()):
+                    if isinstance(value, str):
+                        match = _HEADER_REF.match(value)
+                        if not match:
+                            notes.append(
+                                ImportNote(
+                                    tool=self.id,
+                                    server=name,
+                                    field="header",
+                                    name=str(key),
+                                )
+                            )
+            environment = entry.get("environment")
+            if isinstance(environment, Mapping):
+                for key, value in sorted(environment.items()):
+                    if isinstance(value, str):
+                        ref = _ENV_REF.match(value)
+                        if ref and ref.group(1) == key:
+                            continue
+                        if "{env:" in value:
+                            continue
+                        if env_value_looks_secret(str(key), value):
+                            notes.append(
+                                ImportNote(
+                                    tool=self.id,
+                                    server=name,
+                                    field="env",
+                                    name=str(key),
+                                )
+                            )
+        return notes
 
     def read_skills(self, env: Env, scope: Scope) -> list[SkillRef]:
         return read_skill_dir(self.paths(env, scope).skills_dir)

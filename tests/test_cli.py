@@ -9,11 +9,11 @@ import unittest
 
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
 from one_setup_all_agents import __version__
-from one_setup_all_agents.cli import EXIT_NOT_IMPLEMENTED, build_parser, main
+from one_setup_all_agents.cli import build_parser, main
 
 COMMANDS = ("init", "sync", "status", "undo")
 # Commands that are still stubs in pre-alpha; each phase removes its command.
-STUB_COMMANDS = ("init", "sync", "status", "undo")
+STUB_COMMANDS: tuple[str, ...] = ()
 
 
 def _run_main(argv):
@@ -58,6 +58,14 @@ class HelpTests(unittest.TestCase):
             self.assertEqual(code, 0, command)
             self.assertIn("usage:", out)
 
+    def test_advanced_options_group_appears_in_help_for_all_commands(self):
+        for command in COMMANDS:
+            code, out, _ = _run_main([command, "--help"])
+            self.assertEqual(code, 0, command)
+            self.assertIn(
+                "advanced options:", out.lower(), f"missing advanced options group in {command}"
+            )
+
 
 class HiddenCommandTests(unittest.TestCase):
     def test_internal_commands_are_not_listed_in_help(self):
@@ -76,12 +84,7 @@ class HiddenCommandTests(unittest.TestCase):
 
 class PreAlphaBehaviorTests(unittest.TestCase):
     def test_commands_report_not_implemented_and_change_nothing(self):
-        for command in STUB_COMMANDS:
-            code, out, err = _run_main([command])
-            self.assertEqual(code, EXIT_NOT_IMPLEMENTED, command)
-            self.assertEqual(out, "")
-            self.assertIn("not implemented yet", err)
-            self.assertIn("nothing was changed", err)
+        self.assertEqual(STUB_COMMANDS, ())
 
 
 class ModuleEntryPointTests(unittest.TestCase):

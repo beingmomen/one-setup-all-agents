@@ -41,15 +41,21 @@ def _cmd_init(args: argparse.Namespace, ctx: CommandContext) -> int:
 
 
 def _cmd_sync(args: argparse.Namespace, ctx: CommandContext) -> int:
-    raise NotImplementedError("`all-agents sync` is not implemented yet (planned for Phase 3/5).")
+    from .commands import sync
+
+    return sync.run(args, ctx)
 
 
 def _cmd_status(args: argparse.Namespace, ctx: CommandContext) -> int:
-    raise NotImplementedError("`all-agents status` is not implemented yet (planned for Phase 5).")
+    from .commands import status
+
+    return status.run(args, ctx)
 
 
 def _cmd_undo(args: argparse.Namespace, ctx: CommandContext) -> int:
-    raise NotImplementedError("`all-agents undo` is not implemented yet (planned for Phase 5).")
+    from .commands import undo
+
+    return undo.run(args, ctx)
 
 
 def _hidden_run(argv: list[str]) -> int:
@@ -110,7 +116,8 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument(
         "--dry-run", action="store_true", help="show what would happen, write nothing"
     )
-    init.add_argument(
+    adv_init = init.add_argument_group("advanced options")
+    adv_init.add_argument(
         "--from", dest="from_tool", metavar="TOOL", help="import from this tool first"
     )
     init.set_defaults(func=_cmd_init)
@@ -122,9 +129,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sync.add_argument("--yes", action="store_true", help="apply without asking for confirmation")
     sync.add_argument(
+        "--dry-run", action="store_true", help="show what would be done without writing anything"
+    )
+    adv_sync = sync.add_argument_group("advanced options")
+    adv_sync.add_argument(
         "--tool", action="append", metavar="TOOL", help="limit to this tool (repeatable)"
     )
-    sync.add_argument(
+    adv_sync.add_argument(
         "--only",
         action="append",
         choices=["instructions", "mcp", "skills"],
@@ -137,7 +148,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="show whether each tool matches the shared config",
         description="Show, per tool and per kind, whether the tool matches the shared config.",
     )
-    status.add_argument("--json", action="store_true", help="machine-readable output")
+    adv_status = status.add_argument_group("advanced options")
+    adv_status.add_argument("--json", action="store_true", help="machine-readable output")
+    adv_status.add_argument("--versions", action="store_true", help="probe tool versions (slower)")
     status.set_defaults(func=_cmd_status)
 
     undo = sub.add_parser(
@@ -145,8 +158,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="reverse the last change (or a chosen one) with one command",
         description="Reverse the last operation, or a chosen one, using the journal.",
     )
-    undo.add_argument("--list", action="store_true", help="list operations that can be undone")
-    undo.add_argument(
+    adv_undo = undo.add_argument_group("advanced options")
+    adv_undo.add_argument("--list", action="store_true", help="list operations that can be undone")
+    adv_undo.add_argument(
         "--force", action="store_true", help="also revert files changed since the operation"
     )
     undo.set_defaults(func=_cmd_undo)

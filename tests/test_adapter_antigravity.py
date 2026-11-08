@@ -178,6 +178,33 @@ class PathTests(Base):
         self.assertTrue(found.installed)
         self.assertEqual(Path(found.binary).resolve(), binary.resolve())
 
+    def test_detect_warns_on_extra_instruction_files(self):
+        gemini_dir = self.env.home / ".gemini"
+        config_dir = gemini_dir / "config"
+        config_dir.mkdir(parents=True)
+        extra_files = [
+            gemini_dir / "AGENTS.md",
+            config_dir / "AGENTS.md",
+            config_dir / "GEMINI.md",
+        ]
+        for f in extra_files:
+            f.write_text("extra", encoding="utf-8")
+
+        det = self.adapter.detect(self.env)
+        self.assertEqual(len(det.warnings), 3)
+        self.assertIn(
+            "~/.gemini/AGENTS.md also read by the tool; not managed; the rules would apply twice",
+            det.warnings,
+        )
+        self.assertIn(
+            "~/.gemini/config/AGENTS.md also read by the tool; not managed; the rules would apply twice",
+            det.warnings,
+        )
+        self.assertIn(
+            "~/.gemini/config/GEMINI.md also read by the tool; not managed; the rules would apply twice",
+            det.warnings,
+        )
+
     def test_detect_knows_the_default_windows_install_from_the_given_environ(self):
         local = self.root / "local"
         exe = local / "agy" / "bin" / "agy.exe"

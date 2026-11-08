@@ -697,6 +697,16 @@ class McpUnsupportedTests(Base):
         self.assertEqual(self.executable(ops), [])
         self.assertIn("demo-server", self.doc()["mcp_servers"])
 
+    def test_import_notes_finds_secret_env_and_headers(self):
+        self.write_config(
+            '[mcp_servers.srv]\ncommand = "c"\n[mcp_servers.srv.env]\nTOKEN = "sk-placeholder-secret-token-val"\n'
+        )
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0].server, "srv")
+        self.assertEqual(notes[0].field, "env")
+        self.assertEqual(notes[0].name, "TOKEN")
+
 
 class UnreadableConfigTests(Base):
     def assert_refused(self, content, desired_names=("demo-server",)):

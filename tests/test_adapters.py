@@ -45,6 +45,91 @@ class RegistryTests(unittest.TestCase):
 
 
 class OptionalKindsTests(unittest.TestCase):
+    def test_snapshot_files_lie_under_home_for_all_adapters(self):
+        env = _env()
+        for adapter in all_adapters():
+            files = adapter.snapshot_files(env, Scope.GLOBAL)
+            self.assertTrue(files, f"{adapter.id} should have snapshot files")
+            for p in files:
+                self.assertTrue(
+                    p.is_relative_to(env.home),
+                    f"{p} in {adapter.id} should lie under env.home",
+                )
+
+    def test_snapshot_files_default_collects_paths(self):
+        class DummyAdapter(ToolAdapter):
+            id = "dummy"
+            label = "Dummy"
+            capabilities = frozenset()
+
+            def detect(self, env):
+                return Detection(installed=False)
+
+            def paths(self, env, scope):
+                return Paths(
+                    instructions=env.home / "inst.md",
+                    mcp=env.home / "mcp.json",
+                    settings=env.home / "settings.json",
+                )
+
+            def read_instructions(self, env, scope):
+                return None
+
+            def read_mcp(self, env, scope):
+                return {}
+
+            def read_skills(self, env, scope):
+                return []
+
+            def plan_instructions(self, env, scope, desired, owned):
+                return []
+
+            def plan_mcp(self, env, scope, desired, owned):
+                return []
+
+            def plan_skills(self, env, scope, desired, owned):
+                return []
+
+        adapter = DummyAdapter()
+        env = _env()
+        files = adapter.snapshot_files(env, Scope.GLOBAL)
+        self.assertEqual(
+            files,
+            (env.home / "inst.md", env.home / "mcp.json", env.home / "settings.json"),
+        )
+
+    def test_import_notes_defaults_to_empty_list(self):
+        class DummyAdapter(ToolAdapter):
+            id = "dummy"
+            label = "Dummy"
+            capabilities = frozenset()
+
+            def detect(self, env):
+                return Detection(installed=False)
+
+            def paths(self, env, scope):
+                return Paths()
+
+            def read_instructions(self, env, scope):
+                return None
+
+            def read_mcp(self, env, scope):
+                return {}
+
+            def read_skills(self, env, scope):
+                return []
+
+            def plan_instructions(self, env, scope, desired, owned):
+                return []
+
+            def plan_mcp(self, env, scope, desired, owned):
+                return []
+
+            def plan_skills(self, env, scope, desired, owned):
+                return []
+
+        self.assertEqual(DummyAdapter().import_notes(_env()), [])
+
     def test_optional_kinds_default_to_unsupported_not_silence(self):
         env = _env()
         for tool in ("opencode", "claude", "codex", "agy"):
@@ -105,6 +190,13 @@ class NoStubsTests(unittest.TestCase):
         for cls in ADAPTERS:
             self.assertFalse(cls.__abstractmethods__, cls.id)
             self.assertNotIn("NotImplementedError", inspect.getsource(cls), cls.id)
+
+    def test_all_adapter_modules_share_the_base_config_unreadable_class(self):
+        from one_setup_all_agents.adapters import antigravity, base, claude_code, codex, opencode
+
+        for module in (opencode, claude_code, codex, antigravity):
+            self.assertIs(module.ConfigUnreadable, base.ConfigUnreadable)
+        self.assertTrue(issubclass(antigravity.ManifestUnreadable, base.ConfigUnreadable))
 
 
 if __name__ == "__main__":

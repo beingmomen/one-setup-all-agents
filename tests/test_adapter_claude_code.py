@@ -745,6 +745,16 @@ class DisabledServerTests(Base):
         out = self.adapter.normalize_mcp({"a": self.stdio("a"), "b": self.off("b")})
         self.assertEqual(set(out), {"a"})
 
+    def test_import_notes_finds_secret_env_and_headers(self):
+        self.write_state(
+            b'{"mcpServers": {"srv": {"command": "c", "env": {"TOKEN": "sk-placeholder-secret-token-val"}}}}'
+        )
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0].server, "srv")
+        self.assertEqual(notes[0].field, "env")
+        self.assertEqual(notes[0].name, "TOKEN")
+
 
 class UnreadableConfigTests(Base):
     def test_syntax_errors_are_refused_not_overwritten(self):

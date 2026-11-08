@@ -106,6 +106,23 @@ class ContextAndUITests(unittest.TestCase):
         self.assertIn("~", out_text)
         self.assertIn("~", err_text)
 
+    def test_leak3_say_and_warn_multiline_token_is_masked(self):
+        ctx = self._ctx()
+        token_40 = "A1b2C3d4E5f6G7h8" * 2 + "12345678"
+        raw_msg = f"line one\n{token_40}\nline three"
+        say(ctx, raw_msg)
+        warn(ctx, raw_msg)
+
+        out_text = self.out.getvalue()
+        err_text = self.err.getvalue()
+
+        self.assertNotIn(token_40, out_text)
+        self.assertNotIn(token_40, err_text)
+        self.assertIn("line one", out_text)
+        self.assertIn("line three", out_text)
+        self.assertIn("line one", err_text)
+        self.assertIn("line three", err_text)
+
     def test_no_output_to_real_stdout_when_injected(self):
         ctx = self._ctx()
         with patch("sys.stdout", new_callable=io.StringIO) as fake_stdout:

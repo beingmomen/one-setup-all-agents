@@ -126,7 +126,9 @@ def _revert_path_entry(env: Env, op_id: str, entry: dict, report: RevertReport) 
     fsops.remove_empty_dirs([Path(p) for p in entry.get("created_dirs", ())])
 
 
-def revert_entries(env: Env, op: journal.Operation, runner: Runner) -> RevertReport:
+def revert_entries(
+    env: Env, op: journal.Operation, runner: Runner, *, force: bool = False
+) -> RevertReport:
     """Revert every entry of `op` not yet reverted. The caller holds the engine lock.
 
     Raises `RevertError`: with `drifted` set and nothing changed, or `partial` when it stopped
@@ -134,14 +136,16 @@ def revert_entries(env: Env, op: journal.Operation, runner: Runner) -> RevertRep
     """
     report = RevertReport(op.id)
     pending = [e for e in op.entries if not e.get("reverted")]
-    drifted = drifted_paths(pending)
-    if drifted:
-        names = ", ".join(str(p) for p in drifted)
-        raise RevertError(
-            f"operation {op.id}: these paths changed since it ran, nothing was reverted: {names}",
-            op_id=op.id,
-            drifted=drifted,
-        )
+    if not force:
+        drifted = drifted_paths(pending)
+        if drifted:
+            names = ", ".join(str(p) for p in drifted)
+            raise RevertError(
+                f"operation {op.id}: these paths changed since it ran, "
+                f"nothing was reverted: {names}",
+                op_id=op.id,
+                drifted=drifted,
+            )
     op.data["pending_revert"] = True
     op.save()
     for entry in sorted(pending, key=lambda e: e["seq"], reverse=True):
@@ -171,27 +175,37 @@ def revert_entries(env: Env, op: journal.Operation, runner: Runner) -> RevertRep
 
 
 def revert_operation(
-    env: Env, op_id: str, *, run_cli: Runner | None = None, lock_timeout: float = 0.0
+    env: Env,
+    op_id: str,
+    *,
+    force: bool = False,
+    run_cli: Runner | None = None,
+    lock_timeout: float = 0.0,
 ) -> RevertReport:
-    """Put back everything operation `op_id` changed, taking the engine lock.
+    """Put back everything operation op_id changed, taking the engine lock.
 
-    Works on an operation that is `done` (it becomes `undone`), `open` after a crash (it becomes
-    `failed`, marked `recovered`), or `failed` with a revert that did not finish. Anything else
-    is refused. Raises `RevertError` on drift (nothing changed) or when it stops half way.
+        Works on an operation that is done (it becomes undone), open after a crash (it becomes
+
+    ailed, marked
+    ecovered), or
+    ailed with a revert that did not finish. Anything else
+        is refused. Raises RevertError on drift (nothing changed) or when it stops half way.
     """
     runner = run_cli or default_runner(env)
     with engine_lock(env.state_dir, timeout=lock_timeout):
         op = journal.load(env.state_dir, op_id)
-        return revert_locked(env, op, runner)
+        return revert_locked(env, op, runner, force=force)
 
 
-def revert_locked(env: Env, op: journal.Operation, runner: Runner) -> RevertReport:
+def revert_locked(
+    env: Env, op: journal.Operation, runner: Runner, *, force: bool = False
+) -> RevertReport:
     """`revert_operation` for a caller that already holds the lock."""
     status = op.status
     unfinished = status == journal.FAILED and op.data.get("pending_revert")
     if status not in (journal.OPEN, journal.DONE) and not unfinished:
         raise RevertError(f"operation {op.id} is {status}; there is nothing to revert", op_id=op.id)
-    report = revert_entries(env, op, runner)
+    report = revert_entries(env, op, runner, force=force)
     if status == journal.DONE:
         op.set_status(journal.UNDONE, reverted_at=journal.now_iso())
     else:

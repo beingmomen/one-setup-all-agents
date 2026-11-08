@@ -100,6 +100,7 @@ from ..model import (
     Detection,
     Env,
     HeaderRef,
+    ImportNote,
     Instructions,
     ItemRef,
     Kind,
@@ -121,7 +122,7 @@ from ._common import (
     plan_whole_file_instructions,
     read_skill_dir,
 )
-from .base import ToolAdapter
+from .base import ConfigUnreadable, ToolAdapter
 
 CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
 BIN_ENV = "ALL_AGENTS_CLAUDE_BIN"
@@ -155,10 +156,6 @@ _HEADER_REF = re.compile(
     r"^(?:(?P<scheme>[A-Za-z][A-Za-z0-9._-]*) )?\$\{(?P<var>[A-Za-z_][A-Za-z0-9_]*)\}$"
 )
 _HTTP_TYPES = frozenset({"http", "sse", "streamable-http"})
-
-
-class ConfigUnreadable(ValueError):
-    """`.claude.json` exists but cannot be understood. It is never touched."""
 
 
 # -- paths -------------------------------------------------------------------------------------
@@ -576,6 +573,52 @@ class ClaudeCodeAdapter(ToolAdapter):
             for name, entry in config.members.items()
             if _entry_shaped(entry) and _representable(entry)
         }
+
+    def import_notes(self, env: Env, scope: Scope = Scope.GLOBAL) -> list[ImportNote]:
+        path = self.paths(env, scope).mcp
+        if path is None or not path.is_file():
+            return []
+        try:
+            config = load_config(path)
+        except ConfigUnreadable:
+            return []
+        notes: list[ImportNote] = []
+        for name, entry in sorted(config.members.items()):
+            if not isinstance(entry, Mapping):
+                continue
+            raw_headers = entry.get("headers")
+            if isinstance(raw_headers, Mapping):
+                for key, value in sorted(raw_headers.items()):
+                    if isinstance(value, str):
+                        match = _HEADER_REF.match(value)
+                        if not match:
+                            notes.append(
+                                ImportNote(
+                                    tool=self.id,
+                                    server=name,
+                                    field="header",
+                                    name=str(key),
+                                )
+                            )
+            environment = entry.get("env")
+            if isinstance(environment, Mapping):
+                for key, value in sorted(environment.items()):
+                    if isinstance(value, str):
+                        ref = _ENV_REF.match(value)
+                        if ref and ref.group(1) == key:
+                            continue
+                        if "${" in value:
+                            continue
+                        if env_value_looks_secret(str(key), value):
+                            notes.append(
+                                ImportNote(
+                                    tool=self.id,
+                                    server=name,
+                                    field="env",
+                                    name=str(key),
+                                )
+                            )
+        return notes
 
     def read_skills(self, env: Env, scope: Scope) -> list[SkillRef]:
         return read_skill_dir(self.paths(env, scope).skills_dir, RESERVED_SKILL_DIRS)

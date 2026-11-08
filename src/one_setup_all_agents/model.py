@@ -143,6 +143,19 @@ class Paths:
 
 
 @dataclass(frozen=True)
+class ImportNote:
+    """A skipped secret-looking environment variable or header during import.
+
+    Carries names only, never secret values (ADR 0004, 0017).
+    """
+
+    tool: str
+    server: str
+    field: str  # "env" | "header" | "arg"
+    name: str
+
+
+@dataclass(frozen=True)
 class Instructions:
     """A tool's current global instructions file."""
 
@@ -255,6 +268,7 @@ class EditFile:
     expect_sha256: str | None
     description: str
     sensitive: bool = False  # new file gets mode 0600 instead of the umask default
+    mode: int | None = None
     claims: tuple[ItemRef, ...] = ()  # items this op creates or updates: they become `owned`
     releases: tuple[ItemRef, ...] = ()  # items this op removes: they leave `owned`
 

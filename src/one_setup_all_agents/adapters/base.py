@@ -44,6 +44,7 @@ from typing import ClassVar
 from ..model import (
     Detection,
     Env,
+    ImportNote,
     Instructions,
     ItemRef,
     Kind,
@@ -58,6 +59,10 @@ from ..model import (
     WantedLink,
 )
 from ._common import parse_version
+
+
+class ConfigUnreadable(ValueError):
+    """A tool's config exists but cannot be understood; never overwritten."""
 
 
 class ToolAdapter(ABC):
@@ -109,6 +114,15 @@ class ToolAdapter(ABC):
     @abstractmethod
     def read_skills(self, env: Env, scope: Scope) -> list[SkillRef]:
         """The skills currently visible to the tool (the user's included)."""
+
+    def snapshot_files(self, env: Env, scope: Scope = Scope.GLOBAL) -> tuple[Path, ...]:
+        """Existing files of this tool to preserve in the safety snapshot before writes."""
+        p = self.paths(env, scope)
+        return tuple(path for path in (p.instructions, p.mcp, p.settings) if path is not None)
+
+    def import_notes(self, env: Env, scope: Scope = Scope.GLOBAL) -> list[ImportNote]:
+        """Notes about unimported secrets or settings in this tool's configuration."""
+        return []
 
     # -- planning (pure: no writes) ----------------------------------------
 

@@ -70,6 +70,17 @@ class AtomicWriteTests(WorkDirCase):
         self.assertEqual(stat.S_IMODE(plain.stat().st_mode), 0o644)
         self.assertEqual(stat.S_IMODE(secret.stat().st_mode), 0o600)
 
+    @unittest.skipUnless(POSIX, "permission bits are a POSIX concept")
+    def test_mode_is_honored_for_new_file(self):
+        f = self.dir / "script.sh"
+        atomic.atomic_write(f, b"#!/bin/sh\n", mode=0o755)
+        self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o755)
+
+    def test_mode_parameter_is_accepted_on_all_platforms(self):
+        f = self.dir / "any_script.txt"
+        atomic.atomic_write(f, b"hello", mode=0o755)
+        self.assertEqual(f.read_bytes(), b"hello")
+
     def test_a_symlink_is_written_through_and_stays_a_symlink(self):
         if not can_symlink(self.dir):
             self.skipTest("symlinks are not available here")

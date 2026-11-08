@@ -95,6 +95,7 @@ def atomic_write(
     data: bytes,
     *,
     sensitive: bool = False,
+    mode: int | None = None,
     expect_sha256: str | None | _Unset = UNSET,
 ) -> None:
     """Write `data` to `path` atomically, following the rules in the module docstring.
@@ -114,7 +115,11 @@ def atomic_write(
     if expect_sha256 is not UNSET and current != expect_sha256:
         raise AtomicWriteError(f"{target.name} changed since it was planned; nothing written")
 
-    new_mode = existing_mode if existing_mode is not None else (0o600 if sensitive else 0o666)
+    new_mode = (
+        existing_mode
+        if existing_mode is not None
+        else (mode if mode is not None else (0o600 if sensitive else 0o666))
+    )
     tmp = target.with_name(f".{target.name}.{os.getpid()}-{uuid.uuid4().hex[:8]}.tmp")
     try:
         fd = os.open(
@@ -124,10 +129,11 @@ def atomic_write(
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        if existing_mode is not None and not sys.platform.startswith("win"):
-            os.chmod(
-                tmp, existing_mode
-            )  # the creation mode is filtered by the umask; copy the exact bits
+        if not sys.platform.startswith("win"):
+            if existing_mode is not None:
+                os.chmod(tmp, existing_mode)
+            elif mode is not None:
+                os.chmod(tmp, mode)
         _replace(tmp, target)
     except BaseException:
         try:

@@ -20,6 +20,7 @@ triple `(tool, kind value, key)`.
 from __future__ import annotations
 
 import json
+import re
 import secrets
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
@@ -181,17 +182,32 @@ def revert_owned(state_dir: Path, delta: dict | None) -> None:
     update_ledger(state_dir, lambda ledger: ledger.__setitem__("owned", _owned_table(items)))
 
 
-def _set_index_status(ledger: dict, op_id: str, status: str, **fields: str) -> None:
+def _set_index_status(ledger: dict, op_id: str, status: str, **fields) -> None:
     for item in ledger["operations"]:
         if item["id"] == op_id:
             item["status"] = status
+            item.update(fields)
             return
-    ledger["operations"].append({"id": op_id, "status": status, **fields})
+    entry = {"id": op_id, "status": status}
+    entry.update(fields)
+    ledger["operations"].append(entry)
 
 
 def list_operations(state_dir: Path) -> list[dict]:
     """The operations of the ledger index, newest first: `[{id, label, created, status}]`."""
     return sorted(read_ledger(state_dir)["operations"], key=lambda o: o["id"], reverse=True)
+
+
+def list_undoable(state_dir: Path) -> list[dict]:
+    """The undoable operations of the ledger index, newest first.
+
+    Returns index entries with status == "done" and kind != "undo".
+    """
+    return [
+        op
+        for op in list_operations(state_dir)
+        if op.get("status") == DONE and op.get("kind", "apply") != "undo"
+    ]
 
 
 # -- one operation -----------------------------------------------------------------------------
@@ -211,6 +227,18 @@ class Operation:
     @property
     def status(self) -> str:
         return self.data["status"]
+
+    @property
+    def label(self) -> str:
+        return self.data["label"]
+
+    @property
+    def kind(self) -> str:
+        return self.data.get("kind", "apply")
+
+    @property
+    def undoes(self) -> str | None:
+        return self.data.get("undoes")
 
     @property
     def entries(self) -> list[dict]:
@@ -238,7 +266,14 @@ class Operation:
         update_ledger(self.state_dir, lambda ledger: _set_index_status(ledger, self.id, status))
 
 
-def begin(state_dir: Path, label: str, *, now: datetime | None = None) -> Operation:
+def begin(
+    state_dir: Path,
+    label: str,
+    *,
+    kind: str = "apply",
+    undoes: str | None = None,
+    now: datetime | None = None,
+) -> Operation:
     """Open a new operation (status `open`) and return it."""
     state_dir = Path(state_dir)
     fsops.ensure_private_dir(state_dir)
@@ -256,13 +291,23 @@ def begin(state_dir: Path, label: str, *, now: datetime | None = None) -> Operat
         "label": label,
         "created": created,
         "status": OPEN,
+        "kind": kind,
+        "undoes": undoes,
         "entries": [],
     }
     op = Operation(state_dir, data)
     op.save()
     update_ledger(
         state_dir,
-        lambda ledger: _set_index_status(ledger, op_id, OPEN, label=label, created=created),
+        lambda ledger: _set_index_status(
+            ledger,
+            op_id,
+            OPEN,
+            label=label,
+            created=created,
+            kind=kind,
+            undoes=undoes,
+        ),
     )
     return op
 
@@ -294,3 +339,113 @@ def find_unfinished(state_dir: Path) -> list[str]:
         if data["status"] == OPEN or (data["status"] == FAILED and data.get("pending_revert")):
             found.append(data["id"])
     return found
+
+
+# -- retention pruning -------------------------------------------------------------------------
+
+_OP_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{4}$")
+
+
+def _is_terminal(state_dir: Path, op_entry: dict) -> bool:
+    """True if operation has reached a terminal status and is not pending recovery."""
+    status = op_entry.get("status")
+    if status not in (DONE, UNDONE, FAILED):
+        return False
+    op_id = op_entry.get("id")
+    if not op_id:
+        return False
+    # If failed, check whether it has pending_revert
+    jpath = journal_path(state_dir, op_id)
+    if jpath.is_file():
+        try:
+            data = _read_json(jpath, JOURNAL_FORMAT, JOURNAL_VERSION)
+            if data.get("status") == OPEN or data.get("pending_revert"):
+                return False
+        except JournalError:
+            return False
+    return True
+
+
+def prune(state_dir: Path, keep: int = 20) -> list[str]:
+    """Prune old operations from disk and index, keeping at most keep terminal operations.
+
+    Raises ValueError if keep < 1.
+    Terminal statuses are done, undone, and ailed without pending_revert.
+    Open and pending operations are never deleted. The newest operation is never deleted.
+    Deletes oldest operations first until at most keep terminal operations remain.
+    Symlinks or junctions inside ops/ named like an operation id are unlinked without
+    following them.
+    Returns the list of pruned operation IDs.
+    """
+    if keep < 1:
+        raise ValueError("keep must be >= 1")
+
+    state_dir = Path(state_dir)
+    ledger = read_ledger(state_dir)
+    operations = ledger.get("operations", [])
+    if not operations:
+        return []
+
+    # Newest operation overall (by id) must never be pruned
+    newest_op_id = max((op["id"] for op in operations if "id" in op), default=None)
+
+    # Candidates = index entries whose directories exist, terminal status only
+    candidates: list[dict] = []
+    for entry in operations:
+        op_id = entry.get("id")
+        if not op_id:
+            continue
+        target = op_dir(state_dir, op_id)
+        if fsops.link_kind(target) == "absent":
+            continue
+        if _is_terminal(state_dir, entry):
+            candidates.append(entry)
+
+    # Sort oldest first
+    candidates.sort(key=lambda o: o["id"])
+
+    # If count of terminal operations exceeds keep, remove the oldest
+    excess = len(candidates) - keep
+    if excess <= 0:
+        return []
+
+    to_prune = candidates[:excess]
+    # Guard: never prune the newest operation
+    if newest_op_id:
+        to_prune = [op for op in to_prune if op.get("id") != newest_op_id]
+
+    if not to_prune:
+        return []
+
+    ops_base = ops_dir(state_dir).resolve()
+    pruned_ids: list[str] = []
+
+    for op in to_prune:
+        op_id = op["id"]
+        if not _OP_ID_RE.match(op_id):
+            continue
+        target = op_dir(state_dir, op_id)
+        kind = fsops.link_kind(target)
+        if kind in ("symlink", "junction"):
+            fsops.remove_link(target)
+            pruned_ids.append(op_id)
+        elif kind == "dir":
+            if target.resolve().parent != ops_base:
+                continue
+            fsops.remove_tree(target)
+            pruned_ids.append(op_id)
+        elif kind == "file":
+            target.unlink()
+            pruned_ids.append(op_id)
+
+    if pruned_ids:
+        pruned_set = set(pruned_ids)
+        update_ledger(
+            state_dir,
+            lambda led: led.__setitem__(
+                "operations",
+                [o for o in led.get("operations", []) if o.get("id") not in pruned_set],
+            ),
+        )
+
+    return pruned_ids
