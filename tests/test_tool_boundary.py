@@ -37,7 +37,9 @@ FIXED_NAMES = (
     "gemini",
     "agy",
     "opencode.jsonc",
-    "config.toml",
+    ".codex/config.toml",
+    ".codex\\config.toml",
+    ".codex",
     ".claude.json",
     "mcp_config.json",
     "skills.json",
@@ -145,6 +147,14 @@ class ToolBoundaryTests(unittest.TestCase):
         self.assertTrue(all(name.startswith("adapters/") for name in exempt))
         scanned = {p.relative_to(PACKAGE).as_posix() for p in scanned_files()}
         self.assertFalse(exempt & scanned)
+
+    def test_bare_config_toml_is_allowed_but_tool_specific_config_path_is_refused(self):
+        patterns = banned_patterns()
+        self.assertEqual(find_leaks('SOURCE_CONFIG_NAME = "config.toml"\n', patterns), [])
+        self.assertEqual([n for n, _ in find_leaks('PATH = ".codex/config.toml"\n', patterns)], [1])
+        self.assertEqual(
+            [n for n, _ in find_leaks('PATH = ".codex\\\\config.toml"\n', patterns)], [1]
+        )
 
     def test_the_scan_can_fail(self):
         """A check that cannot fail proves nothing: planted leaks are found, clean text is not."""

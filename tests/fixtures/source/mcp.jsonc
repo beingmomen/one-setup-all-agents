@@ -1,0 +1,11 @@
+// Names only: no secrets. Reference environment variables with ${VAR_NAME}.
+{
+  "version": 1,
+  "servers": {
+    "demo-server": {
+      "command": "demo-server-bin",
+      "args": ["--port", "8080"],
+      "env_vars": ["DEMO_PORT"]
+    }
+  }
+}

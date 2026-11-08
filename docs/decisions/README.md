@@ -18,3 +18,4 @@ Short ADRs. Each one gives the decision, the reason and the open points. Status 
 | [0012](0012-codex-adapter-and-shared-links.md) | Codex adapter and shared skill links | Accepted |
 | [0013](0013-antigravity-adapter.md) | Antigravity adapter | Accepted |
 | [0014](0014-tool-detection.md) | Tool detection and version probes | Accepted |
+| [0015](0015-source-layout-v1.md) | Source layout v1 | Proposed |

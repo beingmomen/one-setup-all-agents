@@ -332,6 +332,7 @@ class ApplyTests(WorkDirCase):
 
     def test_opencode_file_keeps_comments_crlf_and_everything_else(self):
         path = self.home / ".config" / "opencode" / "opencode.jsonc"
+        path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
         before = path.read_bytes().decode("utf-8")
         self.assertIn("\r\n", before)
         cli("apply", "--apply", "--tool", "opencode", home=self.home)

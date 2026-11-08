@@ -3,6 +3,11 @@
 Phase 0: the argument parser and `--help` work; every command reports that it is
 not implemented yet and exits with status 2.
 
+Exit codes:
+    0: ok or nothing to do
+    1: refused or failed, nothing left changed
+    2: usage error or not implemented (argparse's own / Phase 0 stub)
+
 Planned behavior of each command (v0.1, global scope only):
 
     init    Detect installed tools, import what is already configured (instructions,
@@ -21,6 +26,7 @@ import sys
 from collections.abc import Callable, Sequence
 
 from . import __version__
+from .context import CommandContext, default_context
 
 PROG = "all-agents"
 
@@ -28,19 +34,21 @@ PROG = "all-agents"
 EXIT_NOT_IMPLEMENTED = 2
 
 
-def _cmd_init(args: argparse.Namespace) -> int:
-    raise NotImplementedError("`all-agents init` is not implemented yet (planned for Phase 4).")
+def _cmd_init(args: argparse.Namespace, ctx: CommandContext) -> int:
+    from .commands import init
+
+    return init.run(args, ctx)
 
 
-def _cmd_sync(args: argparse.Namespace) -> int:
+def _cmd_sync(args: argparse.Namespace, ctx: CommandContext) -> int:
     raise NotImplementedError("`all-agents sync` is not implemented yet (planned for Phase 3/5).")
 
 
-def _cmd_status(args: argparse.Namespace) -> int:
+def _cmd_status(args: argparse.Namespace, ctx: CommandContext) -> int:
     raise NotImplementedError("`all-agents status` is not implemented yet (planned for Phase 5).")
 
 
-def _cmd_undo(args: argparse.Namespace) -> int:
+def _cmd_undo(args: argparse.Namespace, ctx: CommandContext) -> int:
     raise NotImplementedError("`all-agents undo` is not implemented yet (planned for Phase 5).")
 
 
@@ -88,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config-dir",
         metavar="DIR",
-        help="use DIR as the source config directory instead of the default (planned)",
+        help="use DIR as the source config directory instead of the default",
     )
 
     sub = parser.add_subparsers(dest="command", metavar="<command>")
@@ -146,21 +154,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None, *, context: CommandContext | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in HIDDEN:
         return HIDDEN[argv[0]](argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
-    func: Callable[[argparse.Namespace], int] | None = getattr(args, "func", None)
+    func: Callable[[argparse.Namespace, CommandContext], int] | None = getattr(args, "func", None)
     if func is None:
         parser.print_help()
         return 0
+    ctx = context or default_context(args)
     try:
-        return func(args)
+        return func(args, ctx)
     except NotImplementedError as exc:
-        print(f"{PROG}: {exc}", file=sys.stderr)
-        print(f"{PROG}: this project is pre-alpha; nothing was changed.", file=sys.stderr)
+        from .ui import warn
+
+        warn(ctx, f"{PROG}: {exc}")
+        warn(ctx, f"{PROG}: this project is pre-alpha; nothing was changed.")
         return EXIT_NOT_IMPLEMENTED
 
 

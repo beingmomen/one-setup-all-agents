@@ -12,6 +12,8 @@ from one_setup_all_agents import __version__
 from one_setup_all_agents.cli import EXIT_NOT_IMPLEMENTED, build_parser, main
 
 COMMANDS = ("init", "sync", "status", "undo")
+# Commands that are still stubs in pre-alpha; each phase removes its command.
+STUB_COMMANDS = ("init", "sync", "status", "undo")
 
 
 def _run_main(argv):
@@ -74,7 +76,7 @@ class HiddenCommandTests(unittest.TestCase):
 
 class PreAlphaBehaviorTests(unittest.TestCase):
     def test_commands_report_not_implemented_and_change_nothing(self):
-        for command in COMMANDS:
+        for command in STUB_COMMANDS:
             code, out, err = _run_main([command])
             self.assertEqual(code, EXIT_NOT_IMPLEMENTED, command)
             self.assertEqual(out, "")

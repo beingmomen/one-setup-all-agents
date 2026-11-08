@@ -1,0 +1,6 @@
+# Test fixture source config
+version = 1
+
+[tools.example]
+enabled = true
+skills_exclude = []
