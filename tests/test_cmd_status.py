@@ -10,9 +10,8 @@ import sys
 import unittest
 from pathlib import Path
 
-from tests.engine_support import EngineCase, FakeRunner
-
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
+from engine_support import EngineCase, FakeRunner
 from one_setup_all_agents.adapters import all_adapters
 from one_setup_all_agents.cli import main
 from one_setup_all_agents.config_source import INSTRUCTIONS_NAME, MCP_NAME, SOURCE_CONFIG_NAME

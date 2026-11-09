@@ -194,8 +194,8 @@ def _set_index_status(ledger: dict, op_id: str, status: str, **fields) -> None:
 
 
 def list_operations(state_dir: Path) -> list[dict]:
-    """The operations of the ledger index, newest first: `[{id, label, created, status}]`."""
-    return sorted(read_ledger(state_dir)["operations"], key=lambda o: o["id"], reverse=True)
+    """The operations of the ledger index, newest first: `[{id, label, created, status, ...}]`."""
+    return list(reversed(read_ledger(state_dir)["operations"]))
 
 
 def list_undoable(state_dir: Path) -> list[dict]:
@@ -241,6 +241,14 @@ class Operation:
         return self.data.get("undoes")
 
     @property
+    def seq(self) -> int:
+        return self.data.get("seq", 0)
+
+    @property
+    def pinned(self) -> bool:
+        return bool(self.data.get("pinned", False))
+
+    @property
     def entries(self) -> list[dict]:
         return self.data["entries"]
 
@@ -272,6 +280,7 @@ def begin(
     *,
     kind: str = "apply",
     undoes: str | None = None,
+    pinned: bool = False,
     now: datetime | None = None,
 ) -> Operation:
     """Open a new operation (status `open`) and return it."""
@@ -284,6 +293,7 @@ def begin(
             break
     fsops.ensure_private_dir(op_dir(state_dir, op_id))
     created = now_iso(now)
+    is_pinned = pinned or label == "init" or label.startswith("init")
     data = {
         "format": JOURNAL_FORMAT,
         "version": JOURNAL_VERSION,
@@ -293,20 +303,27 @@ def begin(
         "status": OPEN,
         "kind": kind,
         "undoes": undoes,
+        "pinned": is_pinned,
         "entries": [],
     }
     op = Operation(state_dir, data)
     op.save()
+    fields: dict[str, object] = {
+        "label": label,
+        "created": created,
+        "kind": kind,
+        "undoes": undoes,
+    }
+    if is_pinned:
+        fields["pinned"] = True
+
     update_ledger(
         state_dir,
         lambda ledger: _set_index_status(
             ledger,
             op_id,
             OPEN,
-            label=label,
-            created=created,
-            kind=kind,
-            undoes=undoes,
+            **fields,
         ),
     )
     return op
@@ -366,16 +383,24 @@ def _is_terminal(state_dir: Path, op_entry: dict) -> bool:
     return True
 
 
+class PruneResult(list):
+    """List of warning strings from pruning, with a `.pruned` attribute containing pruned IDs."""
+
+    def __init__(self, warnings: list[str] | None = None, pruned: list[str] | None = None) -> None:
+        super().__init__(warnings or [])
+        self.pruned: list[str] = pruned or []
+
+
 def prune(state_dir: Path, keep: int = 20) -> list[str]:
-    """Prune old operations from disk and index, keeping at most keep terminal operations.
+    """Prune old operations from disk and index, keeping at most keep done apply operations.
 
     Raises ValueError if keep < 1.
-    Terminal statuses are done, undone, and ailed without pending_revert.
-    Open and pending operations are never deleted. The newest operation is never deleted.
-    Deletes oldest operations first until at most keep terminal operations remain.
-    Symlinks or junctions inside ops/ named like an operation id are unlinked without
-    following them.
-    Returns the list of pruned operation IDs.
+    - Only `done` apply operations count toward `keep`.
+    - `undone`, `undo` and `failed` operations are dropped only when older than the
+      oldest kept `done` operation.
+    - Pinned operations (including the `init` snapshot) and open/pending
+      operations are never pruned.
+    - Returns a PruneResult (a list of warning strings, with a .pruned attribute of pruned IDs).
     """
     if keep < 1:
         raise ValueError("keep must be >= 1")
@@ -384,59 +409,73 @@ def prune(state_dir: Path, keep: int = 20) -> list[str]:
     ledger = read_ledger(state_dir)
     operations = ledger.get("operations", [])
     if not operations:
-        return []
+        return PruneResult()
 
-    # Newest operation overall (by id) must never be pruned
-    newest_op_id = max((op["id"] for op in operations if "id" in op), default=None)
+    # Count all done apply operations (including pinned ones)
+    done_applies: list[tuple[int, dict]] = []
+    for i, op in enumerate(operations):
+        if op.get("status") == DONE and op.get("kind", "apply") != "undo":
+            done_applies.append((i, op))
 
-    # Candidates = index entries whose directories exist, terminal status only
-    candidates: list[dict] = []
-    for entry in operations:
-        op_id = entry.get("id")
-        if not op_id:
+    # If count of done applies <= keep, nothing is old enough to prune
+    if len(done_applies) <= keep:
+        return PruneResult()
+
+    excess = len(done_applies) - keep
+
+    # Oldest unpinned done applies up to excess
+    unpinned_done_applies = [
+        (i, op)
+        for i, op in done_applies
+        if not bool(op.get("pinned", False)) and op.get("label") != "init"
+    ]
+
+    to_prune_done = unpinned_done_applies[:excess]
+    if not to_prune_done:
+        return PruneResult()
+
+    cutoff_idx = to_prune_done[-1][0]
+
+    # Candidates for pruning: non-pinned, terminal operations with index <= cutoff_idx
+    to_prune: list[dict] = []
+    for i, op in enumerate(operations):
+        if i > cutoff_idx:
             continue
-        target = op_dir(state_dir, op_id)
-        if fsops.link_kind(target) == "absent":
+        is_pinned = bool(op.get("pinned", False)) or op.get("label") == "init"
+        if is_pinned:
             continue
-        if _is_terminal(state_dir, entry):
-            candidates.append(entry)
-
-    # Sort oldest first
-    candidates.sort(key=lambda o: o["id"])
-
-    # If count of terminal operations exceeds keep, remove the oldest
-    excess = len(candidates) - keep
-    if excess <= 0:
-        return []
-
-    to_prune = candidates[:excess]
-    # Guard: never prune the newest operation
-    if newest_op_id:
-        to_prune = [op for op in to_prune if op.get("id") != newest_op_id]
+        if _is_terminal(state_dir, op):
+            to_prune.append(op)
 
     if not to_prune:
-        return []
+        return PruneResult()
 
     ops_base = ops_dir(state_dir).resolve()
     pruned_ids: list[str] = []
+    warnings: list[str] = []
 
     for op in to_prune:
-        op_id = op["id"]
-        if not _OP_ID_RE.match(op_id):
+        op_id = op.get("id")
+        if not op_id or not _OP_ID_RE.match(op_id):
             continue
         target = op_dir(state_dir, op_id)
         kind = fsops.link_kind(target)
-        if kind in ("symlink", "junction"):
-            fsops.remove_link(target)
-            pruned_ids.append(op_id)
-        elif kind == "dir":
-            if target.resolve().parent != ops_base:
-                continue
-            fsops.remove_tree(target)
-            pruned_ids.append(op_id)
-        elif kind == "file":
-            target.unlink()
-            pruned_ids.append(op_id)
+        try:
+            if kind in ("symlink", "junction"):
+                fsops.remove_link(target)
+                pruned_ids.append(op_id)
+            elif kind == "dir":
+                if target.resolve().parent != ops_base:
+                    continue
+                fsops.remove_tree(target)
+                pruned_ids.append(op_id)
+            elif kind == "file":
+                target.unlink()
+                pruned_ids.append(op_id)
+            elif kind == "absent":
+                pruned_ids.append(op_id)
+        except OSError as exc:
+            warnings.append(f"failed to prune operation {op_id}: {exc}")
 
     if pruned_ids:
         pruned_set = set(pruned_ids)
@@ -448,4 +487,4 @@ def prune(state_dir: Path, keep: int = 20) -> list[str]:
             ),
         )
 
-    return pruned_ids
+    return PruneResult(warnings=warnings, pruned=pruned_ids)

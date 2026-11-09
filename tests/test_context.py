@@ -1,14 +1,14 @@
 """Tests for CommandContext, UI helpers, and injectable CLI main."""
 
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.engine_support import make_env
-
 import _bootstrap  # noqa: F401
+from engine_support import make_env
 from one_setup_all_agents import commands
 from one_setup_all_agents.cli import build_parser, main
 from one_setup_all_agents.context import CommandContext, default_context
@@ -25,6 +25,18 @@ class ContextAndUITests(unittest.TestCase):
         self.env = make_env(self.home)
         self.out = io.StringIO()
         self.err = io.StringIO()
+        self._patch_home = patch.object(Path, "home", return_value=self.home)
+        self._patch_home.start()
+        self.addCleanup(self._patch_home.stop)
+        clean_env = {
+            "HOME": str(self.home),
+            "USERPROFILE": str(self.home),
+            "APPDATA": str(self.home / "AppData" / "Roaming"),
+            "LOCALAPPDATA": str(self.home / "AppData" / "Local"),
+        }
+        self._patch_env = patch.dict(os.environ, clean_env, clear=True)
+        self._patch_env.start()
+        self.addCleanup(self._patch_env.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -44,6 +56,23 @@ class ContextAndUITests(unittest.TestCase):
         ctx = default_context(args)
         expected = (self.home / "custom_config").resolve()
         self.assertEqual(ctx.env.config_dir, expected)
+
+    def test_default_context_config_dir_takes_precedence_over_env_var(self):
+        os.environ["ALL_AGENTS_CONFIG_DIR"] = str(self.home / "env_config")
+        parser = build_parser()
+        args = parser.parse_args(["--config-dir", str(self.home / "cli_config")])
+        ctx = default_context(args)
+        self.assertEqual(ctx.env.config_dir, (self.home / "cli_config").resolve())
+
+        ctx_no_cli = default_context(parser.parse_args([]))
+        self.assertEqual(ctx_no_cli.env.config_dir, Path(self.home / "env_config"))
+
+    def test_default_context_resolves_relative_config_dir(self):
+        parser = build_parser()
+        args = parser.parse_args(["--config-dir", "relative_config"])
+        ctx = default_context(args)
+        self.assertTrue(ctx.env.config_dir.is_absolute())
+        self.assertEqual(ctx.env.config_dir, Path("relative_config").resolve())
 
     def test_confirm_non_interactive_returns_false_without_prompting(self):
         called = False

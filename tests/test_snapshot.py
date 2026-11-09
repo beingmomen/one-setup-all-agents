@@ -7,9 +7,8 @@ import stat
 import unittest
 from pathlib import Path
 
-from tests.engine_support import POSIX, EngineCase, FakeRunner
-
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
+from engine_support import POSIX, EngineCase, FakeRunner
 from one_setup_all_agents.adapters import all_adapters
 from one_setup_all_agents.engine import journal
 from one_setup_all_agents.engine.apply import apply_plan
@@ -134,6 +133,73 @@ class SnapshotTests(EngineCase):
         payload_dir = operation_dir / "files"
         self.assertTrue(payload_dir.is_dir())
         self.assertTrue(payload_dir.is_relative_to(self.state))
+
+    def test_missing_file_skipped_silently_without_warnings(self):
+        adapter = all_adapters()[0]
+        adapters_by_id = {adapter.id: adapter}
+        for path in adapter.snapshot_files(self.env, Scope.GLOBAL):
+            if path.exists():
+                path.unlink()
+
+        detections = self._installed_detections([adapter])
+        ops, messages = snapshot_ops(self.env, adapters_by_id, detections)
+        self.assertEqual(ops, [])
+        self.assertEqual(messages, [])
+
+    def test_broken_symlink_emits_warning(self):
+        adapter = all_adapters()[0]
+        adapters_by_id = {adapter.id: adapter}
+        paths = list(adapter.snapshot_files(self.env, Scope.GLOBAL))
+        self.assertTrue(paths)
+        snap_path = paths[0]
+        snap_path.parent.mkdir(parents=True, exist_ok=True)
+        if snap_path.exists():
+            snap_path.unlink()
+
+        missing_target = self.home / "nonexistent_target_file.json"
+        try:
+            os.symlink(missing_target, snap_path)
+        except OSError:
+            self.skipTest("Symlinks not supported in this environment")
+
+        detections = self._installed_detections([adapter])
+        ops, messages = snapshot_ops(self.env, adapters_by_id, detections)
+        self.assertEqual(ops, [])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("broken", messages[0].lower())
+
+    def test_existing_directory_emits_warning(self):
+        adapter = all_adapters()[0]
+        adapters_by_id = {adapter.id: adapter}
+        paths = list(adapter.snapshot_files(self.env, Scope.GLOBAL))
+        self.assertTrue(paths)
+        snap_path = paths[0]
+        snap_path.parent.mkdir(parents=True, exist_ok=True)
+        if snap_path.exists():
+            snap_path.unlink()
+        snap_path.mkdir()
+
+        detections = self._installed_detections([adapter])
+        ops, messages = snapshot_ops(self.env, adapters_by_id, detections)
+        self.assertEqual(ops, [])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("not a regular file", messages[0].lower())
+
+    def test_large_file_several_megabytes_snapshotted_without_cap(self):
+        adapter = all_adapters()[0]
+        adapters_by_id = {adapter.id: adapter}
+        paths = list(adapter.snapshot_files(self.env, Scope.GLOBAL))
+        self.assertTrue(paths)
+        snap_path = paths[0]
+        # Write 3 MiB of data
+        large_data = b"x" * (3 * 1024 * 1024)
+        self.write(snap_path, large_data)
+
+        detections = self._installed_detections([adapter])
+        ops, messages = snapshot_ops(self.env, adapters_by_id, detections)
+        self.assertEqual(messages, [])
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].path, snap_path)
 
 
 if __name__ == "__main__":

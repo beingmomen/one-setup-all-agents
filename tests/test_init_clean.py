@@ -9,9 +9,8 @@ import sys
 import unittest
 from pathlib import Path
 
-from tests.engine_support import EngineCase, FakeRunner
-
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
+from engine_support import EngineCase, FakeRunner
 from one_setup_all_agents.adapters import all_adapters
 from one_setup_all_agents.cli import main
 from one_setup_all_agents.config_source import SOURCE_CONFIG_NAME, desired_all, load_source
@@ -89,7 +88,12 @@ class InitCleanMachineTests(EngineCase):
             if paths.instructions:
                 self.write(paths.instructions, b"# Shared instructions\n")
             if paths.mcp:
-                self.write(paths.mcp, b"{}" if "json" in paths.mcp.name else b"")
+                if a.id == "claude":
+                    self.write(paths.mcp, b'{"mcpServers": {"demo": {"command": "demo"}}}')
+                elif "json" in paths.mcp.name:
+                    self.write(paths.mcp, b"{}")
+                else:
+                    self.write(paths.mcp, b"")
             for snap in a.snapshot_files(self.env, Scope.GLOBAL):
                 if not snap.exists():
                     self.write(snap, b"{}" if "json" in snap.name else b"")
@@ -105,6 +109,14 @@ class InitCleanMachineTests(EngineCase):
         self.assertEqual(len(operations), 1)
         self.assertEqual(operations[0]["label"], "init")
         self.assertEqual(operations[0]["status"], "done")
+
+        op_obj = journal.load(self.state, operations[0]["id"])
+        snapshot_entries = [e for e in op_obj.entries if "snapshot" in e.get("description", "")]
+        self.assertGreater(len(snapshot_entries), 0)
+
+        self.assertTrue((self.env.config_dir / SOURCE_CONFIG_NAME).is_file())
+        self.assertTrue((self.env.config_dir / "mcp.jsonc").is_file())
+        self.assertTrue((self.env.config_dir / "instructions.md").is_file())
 
     def test_second_init_is_refused(self):
         # 4. A second init is refused (exit 1)
@@ -169,15 +181,18 @@ class InitCleanMachineTests(EngineCase):
 
     def test_subprocess_smoke_clean_environment(self):
         # Subprocess smoke test in clean temp-folder environment
+        sub_home = self.root / "sub_home"
+        sub_config = self.root / "sub_config"
+        sub_state = self.root / "sub_state"
         sub_env = {
-            "HOME": str(self.home),
-            "USERPROFILE": str(self.home),
+            "HOME": str(sub_home),
+            "USERPROFILE": str(sub_home),
             "APPDATA": str(self.root / "appdata"),
             "LOCALAPPDATA": str(self.root / "localappdata"),
             "XDG_CONFIG_HOME": str(self.root / "xdg_config"),
             "XDG_STATE_HOME": str(self.root / "xdg_state"),
-            "ALL_AGENTS_CONFIG_DIR": str(self.env.config_dir),
-            "ALL_AGENTS_STATE_DIR": str(self.state),
+            "ALL_AGENTS_CONFIG_DIR": str(sub_config),
+            "ALL_AGENTS_STATE_DIR": str(sub_state),
             "PATH": str(Path(sys.executable).parent),
             "PYTHONPATH": str(_bootstrap.SRC),
         }
@@ -195,6 +210,8 @@ class InitCleanMachineTests(EngineCase):
         )
         self.assertEqual(res_dry.returncode, 0, res_dry.stderr)
         self.assertIn("No supported tool was found. Nothing to import.", res_dry.stdout)
+        self.assertFalse(sub_config.exists())
+        self.assertFalse(sub_state.exists())
 
         # Apply
         res_apply = subprocess.run(
@@ -206,6 +223,8 @@ class InitCleanMachineTests(EngineCase):
         )
         self.assertEqual(res_apply.returncode, 0, res_apply.stderr)
         self.assertIn("No supported tool was found. Nothing to import.", res_apply.stdout)
+        self.assertFalse(sub_config.exists())
+        self.assertFalse(sub_state.exists())
 
 
 if __name__ == "__main__":

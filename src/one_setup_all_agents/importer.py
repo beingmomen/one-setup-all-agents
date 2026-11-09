@@ -21,6 +21,7 @@ from .config_source import (
     ToolSettings,
     render_mcp_source,
     render_source_config,
+    server_secret_problems,
 )
 from .engine import fsops
 from .engine.errors import BackupError
@@ -30,6 +31,7 @@ from .model import (
     Detection,
     EditFile,
     Env,
+    ImportNote,
     ItemRef,
     Kind,
     McpServer,
@@ -57,6 +59,7 @@ class McpProposal:
     notes: dict[str, list[str]] = field(default_factory=dict)
     adopt: list[ItemRef] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
+    import_notes: list[ImportNote] = field(default_factory=list)
 
 
 @dataclass
@@ -91,13 +94,12 @@ class ImportProposal:
     skills: SkillsProposal = field(default_factory=SkillsProposal)
     adopt: list[ItemRef] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
+    import_notes: list[ImportNote] = field(default_factory=list)
 
 
 def _normalize_instructions_text(raw: str) -> str:
-    text = raw.lstrip("\ufeff").replace("\r\n", "\n")
-    if not text.endswith("\n"):
-        text += "\n"
-    return text
+    text = raw.lstrip("\ufeff").replace("\r\n", "\n").rstrip("\n")
+    return (text + "\n") if text else ""
 
 
 def propose_instructions(
@@ -110,15 +112,27 @@ def propose_instructions(
 ) -> InstructionsProposal | None:
     """Propose shared instructions and items to adopt across tool readings."""
     candidates: list[tuple[str, str, str]] = []
+    messages: list[str] = []
     for r in readings:
         if r.instructions is not None and getattr(r.instructions, "text", None) is not None:
-            candidates.append((r.tool, r.label, _normalize_instructions_text(r.instructions.text)))
+            text = r.instructions.text
+            if "\ufffd" in text or "\x00" in text:
+                file_str = (
+                    str(r.instructions.path) if hasattr(r.instructions, "path") else "instructions"
+                )
+                messages.append(
+                    f"problem reading {r.tool} instructions: {file_str} "
+                    "contains invalid non-UTF-8 characters; skipped"
+                )
+                continue
+            candidates.append((r.tool, r.label, _normalize_instructions_text(text)))
 
     if not candidates:
+        if messages:
+            return InstructionsProposal(core="", adopt=[], skipped=[], messages=messages)
         return None
 
     distinct_texts = {c[2] for c in candidates}
-    messages: list[str] = []
 
     if len(distinct_texts) == 1:
         core = candidates[0][2]
@@ -189,7 +203,9 @@ def propose_instructions(
             adapter = adapters.get(tool_id)
             if adapter is not None:
                 try:
-                    ops = adapter.plan_instructions(env, Scope.GLOBAL, core, frozenset())
+                    ops = adapter.plan_instructions(
+                        env, Scope.GLOBAL, core, frozenset({INSTRUCTIONS_KEY})
+                    )
                     for op in ops:
                         if isinstance(op, Conflict):
                             messages.append(f"warning: {tool_id}: {op.reason}")
@@ -235,6 +251,7 @@ def propose_mcp(
     proposal_notes: dict[str, list[str]] = {}
     proposal_adopt: list[ItemRef] = []
     messages: list[str] = []
+    import_notes: list[ImportNote] = []
 
     for name in sorted(servers_by_name.keys()):
         entries = servers_by_name[name]
@@ -303,6 +320,39 @@ def propose_mcp(
         if any(not srv.enabled for _, srv in entries):
             chosen = dataclasses.replace(chosen, enabled=False)
 
+        # Check candidate server and entries for literal secret problems
+        chosen_probs = server_secret_problems(chosen)
+        entry_probs_by_tool: dict[str, list[str]] = {}
+        for tool_id, srv in entries:
+            p = server_secret_problems(srv)
+            if p:
+                entry_probs_by_tool[tool_id] = p
+
+        if chosen_probs or entry_probs_by_tool:
+            all_probs = list(chosen_probs)
+            for p in entry_probs_by_tool.values():
+                for item in p:
+                    if item not in all_probs:
+                        all_probs.append(item)
+
+            for prob in all_probs:
+                field_name = "arg" if prob in ("arg", "args") else prob
+                for tool_id, _ in entries:
+                    if tool_id in entry_probs_by_tool or chosen_probs:
+                        adapter = adapter_map.get(tool_id)
+                        tool_label = adapter.label if adapter else tool_labels.get(tool_id, tool_id)
+                        msg = (
+                            f"server {name} in {tool_label}: {field_name} "
+                            "had a literal value that was not imported; "
+                            "move the value to an environment variable and reference it as ${NAME}"
+                        )
+                        if msg not in messages:
+                            messages.append(msg)
+                        import_notes.append(
+                            ImportNote(tool=tool_id, server=name, field=field_name, name=field_name)
+                        )
+            continue
+
         tools_present = [tool_id for tool_id, _ in entries]
         if len(set(tools_present)) < len(installed_tool_ids):
             tools_selector: tuple[str, ...] | None = tuple(sorted(set(tools_present)))
@@ -326,23 +376,44 @@ def propose_mcp(
         if adapter is not None:
             tool_notes = adapter.import_notes(env, Scope.GLOBAL)
             for note in tool_notes:
-                msg = (
-                    f"server {note.server} in {adapter.label}: {note.field} {note.name} "
-                    "had a literal value that was not imported; "
-                    f"set it as an environment variable named {note.name}"
-                )
+                import_notes.append(note)
+                if note.field == "header":
+                    msg = (
+                        f"server {note.server} in {adapter.label}: header '{note.name}' "
+                        "had a literal value that was not imported; "
+                        "reference an environment variable as ${NAME}"
+                    )
+                    note_comment = (
+                        f"{adapter.label}: header '{note.name}' had a literal value that was not "
+                        "imported; reference an environment variable as ${NAME}"
+                    )
+                else:
+                    msg = (
+                        f"server {note.server} in {adapter.label}: {note.field} {note.name} "
+                        "had a literal value that was not imported; "
+                        f"set it as an environment variable named {note.name}"
+                    )
+                    note_comment = (
+                        f"{adapter.label}: {note.field} {note.name} had a literal value "
+                        "that was not imported; "
+                        f"set it as an environment variable named {note.name}"
+                    )
                 messages.append(msg)
-                note_comment = (
-                    f"{adapter.label}: {note.field} {note.name} had a literal value that was not "
-                    f"imported; set it as an environment variable named {note.name}"
-                )
                 proposal_notes.setdefault(note.server, []).append(note_comment)
+
+    dropped_servers = {(n.tool, n.server) for n in import_notes}
+    proposal_adopt = [
+        ref
+        for ref in proposal_adopt
+        if not (ref.kind == Kind.MCP and (ref.tool, ref.key) in dropped_servers)
+    ]
 
     return McpProposal(
         servers=proposal_servers,
         notes=proposal_notes,
         adopt=proposal_adopt,
         messages=messages,
+        import_notes=import_notes,
     )
 
 
@@ -623,11 +694,14 @@ def propose(
         env=env,
         adapters=adapters,
     )
-    if inst_proposal is not None:
+    if inst_proposal is not None and inst_proposal.core:
         proposal.instructions = inst_proposal
         proposal.messages.extend(inst_proposal.messages)
         for tool_id in inst_proposal.adopt:
             proposal.adopt.append(ItemRef(tool_id, Kind.INSTRUCTIONS, INSTRUCTIONS_KEY))
+    elif inst_proposal is not None:
+        proposal.messages.extend(inst_proposal.messages)
+        proposal.messages.append("no instructions found")
     else:
         proposal.messages.append("no instructions found")
 
@@ -642,6 +716,7 @@ def propose(
         proposal.server_notes.update(mcp_proposal.notes)
         proposal.adopt.extend(mcp_proposal.adopt)
         proposal.messages.extend(mcp_proposal.messages)
+        proposal.import_notes.extend(mcp_proposal.import_notes)
 
         skills_proposal = propose_skills(
             readings,

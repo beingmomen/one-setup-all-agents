@@ -16,7 +16,7 @@ Planned behavior of each command (v0.1, global scope only):
     sync    Plan, show, and (after confirmation) apply the source config to every
             detected tool. Shows a dry run by default.
     status  Show, per tool and per kind, whether the tool matches the source config.
-    undo    Reverse the last operation, or a chosen one, from the unified journal.
+    undo    Reverse the last operation from the unified journal.
 """
 
 from __future__ import annotations
@@ -29,9 +29,6 @@ from . import __version__
 from .context import CommandContext, default_context
 
 PROG = "all-agents"
-
-# Exit status used by every stub command in Phase 0.
-EXIT_NOT_IMPLEMENTED = 2
 
 
 def _cmd_init(args: argparse.Namespace, ctx: CommandContext) -> int:
@@ -65,15 +62,8 @@ def _hidden_run(argv: list[str]) -> int:
     return runner.main(argv)
 
 
-def _hidden_legacy(argv: list[str]) -> int:
-    """`all-agents _legacy ...`: the ported core's transitional commands (until Phase 5)."""
-    from ._core import legacy_cli
-
-    return legacy_cli.main(argv)
-
-
 # Internal subcommands: not listed in --help and not part of the four public commands.
-HIDDEN: dict[str, Callable[[list[str]], int]] = {"_run": _hidden_run, "_legacy": _hidden_legacy}
+HIDDEN: dict[str, Callable[[list[str]], int]] = {"_run": _hidden_run}
 
 
 def _tool_names() -> str:
@@ -96,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
             f"{_tool_names()}. Write your config once, "
             "every agent gets the same setup, and any change can be undone with one command."
         ),
-        epilog="Status: pre-alpha. The commands above are not usable yet.",
+        epilog="Status: pre-alpha.",
     )
     parser.add_argument("--version", action="version", version=f"{PROG} {__version__}")
     parser.add_argument(
@@ -155,8 +145,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     undo = sub.add_parser(
         "undo",
-        help="reverse the last change (or a chosen one) with one command",
-        description="Reverse the last operation, or a chosen one, using the journal.",
+        help="reverse the last change with one command",
+        description="Reverse the last operation using the journal.",
     )
     adv_undo = undo.add_argument_group("advanced options")
     adv_undo.add_argument("--list", action="store_true", help="list operations that can be undone")
@@ -179,14 +169,7 @@ def main(argv: Sequence[str] | None = None, *, context: CommandContext | None = 
         parser.print_help()
         return 0
     ctx = context or default_context(args)
-    try:
-        return func(args, ctx)
-    except NotImplementedError as exc:
-        from .ui import warn
-
-        warn(ctx, f"{PROG}: {exc}")
-        warn(ctx, f"{PROG}: this project is pre-alpha; nothing was changed.")
-        return EXIT_NOT_IMPLEMENTED
+    return func(args, ctx)
 
 
 if __name__ == "__main__":

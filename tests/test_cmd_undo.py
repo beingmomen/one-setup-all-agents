@@ -2,22 +2,24 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import io
 import time
 import unittest
-
-from tests.engine_support import POSIX, EngineCase, FakeRunner
+from unittest.mock import patch
 
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
+from engine_support import POSIX, EngineCase, FakeRunner
 from one_setup_all_agents.adapters import all_adapters
 from one_setup_all_agents.cli import main
-from one_setup_all_agents.config_source import INSTRUCTIONS_NAME
+from one_setup_all_agents.config_source import INSTRUCTIONS_NAME, SOURCE_CONFIG_NAME
 from one_setup_all_agents.context import CommandContext
 from one_setup_all_agents.engine import journal
 from one_setup_all_agents.engine import undo as undo_mod
+from one_setup_all_agents.engine.apply import apply_plan
 from one_setup_all_agents.engine.lock import engine_lock
-from one_setup_all_agents.model import Scope
+from one_setup_all_agents.model import EditFile, ItemRef, Kind, Plan, RunCli, Scope
 
 
 class CmdUndoTests(EngineCase):
@@ -339,7 +341,7 @@ class CmdUndoTests(EngineCase):
 
         # Prune retention leaves 20 operations
         pruned = journal.prune(self.state, keep=20)
-        self.assertEqual(len(pruned), 5)
+        self.assertEqual(len(pruned.pruned), 5)
         self.assertEqual(len(journal.list_operations(self.state)), 20)
 
         # Undo operations one by one down to the oldest kept
@@ -364,6 +366,113 @@ class CmdUndoTests(EngineCase):
             code = main(["undo"], context=ctx)
         self.assertEqual(code, 1)
         self.assertIn("lock", err.getvalue().lower())
+
+    def test_failed_undo_with_failing_inverse_cli_can_be_retried_and_sync_not_refused(self):
+        (self.env.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        # 1. Apply a plan with RunCli and EditFile
+        test_file = self.home / "cli_test.txt"
+        self.write(test_file, b"original-content\n")
+
+        plan = Plan(
+            ops=[
+                RunCli(
+                    argv=("test-tool", "apply"),
+                    inverse_argv=("test-tool", "unapply"),
+                    description="test runcli",
+                    claims=(ItemRef("claude", Kind.INSTRUCTIONS, "instructions"),),
+                ),
+                EditFile(
+                    path=test_file,
+                    transform=lambda _: b"applied-content\n",
+                    expect_sha256=hashlib.sha256(b"original-content\n").hexdigest(),
+                    description="test edit",
+                    claims=(ItemRef("claude", Kind.INSTRUCTIONS, "instructions"),),
+                ),
+            ]
+        )
+        op_id = apply_plan(self.env, plan, label="test-run", run_cli=self.runner)
+        self.assertIsNotNone(op_id)
+        self.assertEqual(test_file.read_bytes(), b"applied-content\n")
+
+        # 2. Undo with failing inverse command -> exit 1
+        self.runner.fail_on.append(["test-tool", "unapply"])
+        ctx1, out1, err1 = self._ctx()
+        code1 = main(["undo"], context=ctx1)
+        self.assertEqual(code1, 1)
+
+        # 3. Fix the runner and run undo again -> succeeds, bytes equal original
+        self.runner.fail_on.clear()
+        ctx2, out2, err2 = self._ctx()
+        code2 = main(["undo"], context=ctx2)
+        self.assertEqual(code2, 0, f"undo retry failed: {err2.getvalue()}")
+        self.assertEqual(test_file.read_bytes(), b"original-content\n")
+
+        # 4. sync --dry-run is not refused with "run undo"
+        ctx3, out3, err3 = self._ctx()
+        code3 = main(["sync", "--dry-run"], context=ctx3)
+        self.assertNotIn("an earlier run did not finish", err3.getvalue())
+        self.assertNotEqual(code3, 1)
+
+    def test_interrupted_undo_restores_remaining_paths_on_next_undo(self):
+        (self.env.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        file_a = self.home / "file_a.txt"
+        file_b = self.home / "file_b.txt"
+        self.write(file_a, b"orig_a\n")
+        self.write(file_b, b"orig_b\n")
+
+        plan = Plan(
+            ops=[
+                EditFile(
+                    path=file_a,
+                    transform=lambda _: b"new_a\n",
+                    expect_sha256=hashlib.sha256(b"orig_a\n").hexdigest(),
+                    description="edit a",
+                ),
+                EditFile(
+                    path=file_b,
+                    transform=lambda _: b"new_b\n",
+                    expect_sha256=hashlib.sha256(b"orig_b\n").hexdigest(),
+                    description="edit b",
+                ),
+            ]
+        )
+        op_id = apply_plan(self.env, plan, label="two-files", run_cli=self.runner)
+        self.assertIsNotNone(op_id)
+        self.assertEqual(file_a.read_bytes(), b"new_a\n")
+        self.assertEqual(file_b.read_bytes(), b"new_b\n")
+
+        # Simulate interruption after first restored path (raise from patched restore)
+        import one_setup_all_agents.engine.backup as backup_mod
+
+        real_restore = backup_mod.restore
+        restore_count = 0
+
+        def interrupted_restore(state_dir, op_id, path, state):
+            nonlocal restore_count
+            restore_count += 1
+            if restore_count == 2:
+                raise RuntimeError("simulated crash/interruption during undo restore")
+            return real_restore(state_dir, op_id, path, state)
+
+        with patch(
+            "one_setup_all_agents.engine.revert.backup.restore", side_effect=interrupted_restore
+        ):
+            ctx1, out1, err1 = self._ctx()
+            code1 = main(["undo"], context=ctx1)
+            self.assertEqual(code1, 1)
+
+        # Next undo completes
+        ctx2, out2, err2 = self._ctx()
+        code2 = main(["undo"], context=ctx2)
+        self.assertEqual(code2, 0, f"undo retry failed: {err2.getvalue()}")
+        self.assertEqual(file_a.read_bytes(), b"orig_a\n")
+        self.assertEqual(file_b.read_bytes(), b"orig_b\n")
+
+        # sync --dry-run is not refused with "run undo"
+        ctx3, out3, err3 = self._ctx()
+        code3 = main(["sync", "--dry-run"], context=ctx3)
+        self.assertNotIn("an earlier run did not finish", err3.getvalue())
+        self.assertNotEqual(code3, 1)
 
 
 if __name__ == "__main__":

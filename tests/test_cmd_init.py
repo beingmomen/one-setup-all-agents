@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,12 +14,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.engine_support import FakeRunner, make_env
-
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
+from engine_support import FakeRunner, make_env
 from one_setup_all_agents.adapters import all_adapters
 from one_setup_all_agents.cli import main
-from one_setup_all_agents.config_source import SOURCE_CONFIG_NAME
+from one_setup_all_agents.config_source import SOURCE_CONFIG_NAME, load_source
 from one_setup_all_agents.context import CommandContext
 from one_setup_all_agents.engine import journal
 from one_setup_all_agents.engine.revert import revert_operation
@@ -47,6 +49,18 @@ class CmdInitTests(unittest.TestCase):
             out=self.out,
             err=self.err,
         )
+
+    def _tree_digest(self, root: Path) -> dict[str, str]:
+        digest: dict[str, str] = {}
+        for p in sorted(root.rglob("*")):
+            rel = p.relative_to(root).as_posix()
+            if p.is_file():
+                digest[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+            elif p.is_dir():
+                digest[rel] = "<dir>"
+            elif p.is_symlink():
+                digest[rel] = f"<symlink:{os.readlink(p)}>"
+        return digest
 
     def _installed_detection(self) -> Detection:
         return Detection(
@@ -103,6 +117,8 @@ class CmdInitTests(unittest.TestCase):
         self.assertFalse(self.env.state_dir.exists())
 
     def test_dry_run_exits_zero_and_writes_nothing(self):
+        (self.home / "pre_existing.txt").write_text("content", encoding="utf-8")
+        before_digest = self._tree_digest(self.home)
         ctx = self._ctx()
         with patch(
             "one_setup_all_agents.commands.init.detect_all",
@@ -111,10 +127,37 @@ class CmdInitTests(unittest.TestCase):
             code = main(["init", "--dry-run"], context=ctx)
         self.assertEqual(code, 0)
         self.assertIn("Import proposal:", self.out.getvalue())
+        self.assertEqual(self._tree_digest(self.home), before_digest)
         self.assertFalse(self.env.config_dir.exists())
         self.assertFalse(self.env.state_dir.exists())
 
     def test_secret_planted_in_problem_does_not_leak_into_output(self):
+        agy_adapter = [a for a in all_adapters() if a.id == "agy"][0]
+        agy_paths = agy_adapter.paths(self.env, Scope.GLOBAL)
+        agy_paths.mcp.parent.mkdir(parents=True, exist_ok=True)
+        agy_paths.mcp.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "sec-env": {
+                            "command": "cmd1",
+                            "env": {"API_KEY": PLANTED_SECRET},
+                        },
+                        "sec-header": {
+                            "serverUrl": "https://example.com/sse",
+                            "headers": {"Authorization": f"Bearer {PLANTED_SECRET}"},
+                        },
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        agy_detection = Detection(
+            installed=True,
+            tool=agy_adapter.id,
+            label=agy_adapter.label,
+            binary=Path("/bin/agy"),
+        )
         ctx = self._ctx()
         detection = self._installed_detection()
         problem = Problem(
@@ -123,6 +166,9 @@ class CmdInitTests(unittest.TestCase):
             path=None,
             message=f"failed authentication with token {PLANTED_SECRET}",
         )
+        from one_setup_all_agents.reader import read_all
+
+        real_readings = list(read_all(self.env, [agy_adapter], [agy_detection]))
         reading = ToolReading(
             tool="example-tool",
             label="Example Tool",
@@ -134,11 +180,11 @@ class CmdInitTests(unittest.TestCase):
         with (
             patch(
                 "one_setup_all_agents.commands.init.detect_all",
-                return_value=[detection],
+                return_value=[agy_detection, detection],
             ),
             patch(
                 "one_setup_all_agents.commands.init.read_all",
-                return_value=[reading],
+                return_value=real_readings + [reading],
             ),
         ):
             code = main(["init", "--dry-run"], context=ctx)
@@ -237,6 +283,170 @@ class CmdInitTests(unittest.TestCase):
         self.assertTrue(
             "No supported tool was found" in result.stdout or "Import proposal:" in result.stdout
         )
+
+    def test_init_over_fixture_home_excludes_literal_secrets_and_loads_source(self):
+        # 1. Copy fixture home
+        fixtures_home = Path(__file__).resolve().parent / "fixtures" / "home"
+        shutil.copytree(fixtures_home, self.home, dirs_exist_ok=True)
+
+        detections = [
+            Detection(installed=True, tool=a.id, label=a.label, binary=Path(f"/bin/{a.id}"))
+            for a in all_adapters()
+        ]
+
+        ctx = self._ctx()
+        with patch("one_setup_all_agents.commands.init.detect_all", return_value=detections):
+            code = main(["init", "--yes"], context=ctx)
+        self.assertEqual(code, 0, f"init failed: {self.err.getvalue()}")
+
+        # Assert no fake secrets appear in any file under config_dir
+        fixture_secrets = [
+            "FAKE-ARG-SECRET-bbb222",
+            "FAKE-URL-SECRET-ccc333",
+            "FAKE-ENV-SECRET-aaa111",
+        ]
+        for p in self.env.config_dir.rglob("*"):
+            if p.is_file():
+                file_text = p.read_text(encoding="utf-8")
+                for s in fixture_secrets:
+                    self.assertNotIn(s, file_text, f"secret {s} found in {p}")
+
+        # Assert load_source on config_dir succeeds
+        loaded = load_source(self.env.config_dir, [a.id for a in all_adapters()])
+        self.assertIsNotNone(loaded)
+
+        # Assert summary names secret-args without values
+        out_text = self.out.getvalue() + self.err.getvalue()
+        self.assertIn("secret-args", out_text)
+        for s in fixture_secrets:
+            self.assertNotIn(s, out_text)
+
+        # Assert status and sync --dry-run exit 0 or 2, never 1
+        out_status = io.StringIO()
+        err_status = io.StringIO()
+        ctx_status = CommandContext(
+            env=self.env,
+            read_line=lambda p: "",
+            is_interactive=False,
+            out=out_status,
+            err=err_status,
+        )
+        with patch("one_setup_all_agents.commands.status.detect_all", return_value=detections):
+            code_status = main(["status"], context=ctx_status)
+        self.assertIn(
+            code_status, (0, 2), f"status failed with code {code_status}: {err_status.getvalue()}"
+        )
+
+        out_sync = io.StringIO()
+        err_sync = io.StringIO()
+        ctx_sync = CommandContext(
+            env=self.env,
+            read_line=lambda p: "",
+            is_interactive=False,
+            out=out_sync,
+            err=err_sync,
+        )
+        with patch("one_setup_all_agents.commands.sync.detect_all", return_value=detections):
+            code_sync = main(["sync", "--dry-run"], context=ctx_sync)
+        self.assertIn(
+            code_sync, (0, 2, 3), f"sync failed with code {code_sync}: {err_sync.getvalue()}"
+        )
+        self.assertNotEqual(code_sync, 1, f"sync failed with source error: {err_sync.getvalue()}")
+
+    def test_init_passes_probe_to_detect_all(self):
+        ctx = self._ctx()
+        ctx.probe = lambda argv: "dummy-version"
+        with patch("one_setup_all_agents.commands.init.detect_all") as mock_detect:
+            mock_detect.return_value = []
+            from one_setup_all_agents.cli import build_parser
+            from one_setup_all_agents.commands import init
+
+            parser = build_parser()
+            args = parser.parse_args(["init", "--yes"])
+            init.run(args, ctx)
+            mock_detect.assert_called_once_with(ctx.env, probe=ctx.probe)
+
+    def test_post_init_warning_skips_link_relink_of_adopted_skills(self):
+        from one_setup_all_agents.commands import init
+        from one_setup_all_agents.model import ItemRef, Link, Plan
+
+        ctx = self._ctx()
+        detection = self._installed_detection()
+        adopted = [ItemRef(detection.tool, Kind.SKILLS, "skill-a")]
+        link_op = Link(
+            link=Path("/link/a"),
+            target=Path("/target/a"),
+            description="link skill",
+            claims=(ItemRef(detection.tool, Kind.SKILLS, "skill-a"),),
+        )
+        ctx.env.config_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.env.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        with (
+            patch("one_setup_all_agents.commands.init.load_source"),
+            patch("one_setup_all_agents.commands.init.build_plan", return_value=Plan((link_op,))),
+            patch("one_setup_all_agents.commands.init.all_adapters", return_value=[]),
+        ):
+            rc = init._check_adopted_replan(ctx, [detection], adopted)
+            self.assertEqual(rc, 0)
+            self.assertNotIn("still requires changes", ctx.err.getvalue())
+
+    def test_post_init_replan_surfaces_unexpected_error_with_warning_and_exit_one(self):
+        from one_setup_all_agents.commands import init
+        from one_setup_all_agents.model import ItemRef
+
+        ctx = self._ctx()
+        detection = self._installed_detection()
+        adopted = [ItemRef(detection.tool, Kind.SKILLS, "skill-a")]
+        ctx.env.config_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.env.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        with (
+            patch(
+                "one_setup_all_agents.commands.init.load_source",
+                side_effect=RuntimeError("unexpected boom"),
+            ),
+            patch("one_setup_all_agents.commands.init.all_adapters", return_value=[]),
+        ):
+            rc = init._check_adopted_replan(ctx, [detection], adopted)
+            self.assertEqual(rc, 1)
+            self.assertIn("unexpected boom", ctx.err.getvalue())
+
+    def test_snapshot_retry_reruns_read_and_proposal_and_matches_backup_error(self):
+        from one_setup_all_agents.cli import build_parser
+        from one_setup_all_agents.commands import init
+        from one_setup_all_agents.engine.errors import BackupError
+
+        adapter = all_adapters()[0]
+        paths = adapter.paths(self.env, Scope.GLOBAL)
+        paths.instructions.parent.mkdir(parents=True, exist_ok=True)
+        paths.instructions.write_text("# Initial\n", encoding="utf-8")
+        detection = Detection(
+            installed=True, tool=adapter.id, label=adapter.label, binary=Path("/bin/adapter")
+        )
+
+        ctx = self._ctx()
+        call_count = [0]
+        orig_apply = init.apply_plan
+
+        def fake_apply(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                paths.instructions.write_text("# Changed bytes\n", encoding="utf-8")
+                raise BackupError("backup failed: permission denied")
+            return orig_apply(*args, **kwargs)
+
+        with (
+            patch("one_setup_all_agents.commands.init.detect_all", return_value=[detection]),
+            patch("one_setup_all_agents.commands.init.apply_plan", side_effect=fake_apply),
+        ):
+            parser = build_parser()
+            args = parser.parse_args(["init", "--yes"])
+            code = init.run(args, ctx)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(call_count[0], 2)
+        inst_file = self.env.config_dir / "instructions.md"
+        self.assertTrue(inst_file.is_file())
+        self.assertEqual(inst_file.read_text(encoding="utf-8"), "# Changed bytes\n")
 
 
 if __name__ == "__main__":

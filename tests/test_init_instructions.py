@@ -8,9 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.engine_support import FakeRunner, make_env
-
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
+from engine_support import FakeRunner, make_env
 from one_setup_all_agents.adapters import ADAPTERS, all_adapters
 from one_setup_all_agents.cli import build_parser
 from one_setup_all_agents.commands import init
@@ -263,6 +262,7 @@ class InitInstructionsTests(unittest.TestCase):
         desired = desired_all(source, [adapter.id])
         plan = build_plan(self.env, [adapter], desired)
         edit_ops = [op for op in plan.executable if isinstance(op, EditFile)]
+        self.assertEqual(plan.conflicts, [])
         self.assertEqual(
             edit_ops, [], "adopted file with identical content should have no EditFile"
         )
@@ -305,6 +305,7 @@ class InitInstructionsTests(unittest.TestCase):
         desired = desired_all(source, [adapter.id])
         plan = build_plan(self.env, [adapter], desired)
         edit_ops = [op for op in plan.executable if isinstance(op, EditFile)]
+        self.assertEqual(plan.conflicts, [])
         self.assertEqual(len(edit_ops), 1)
 
     def test_undo_restores_tool_file_changed_after_sync_apply(self):
@@ -355,6 +356,52 @@ class InitInstructionsTests(unittest.TestCase):
         report = revert_operation(self.env, op_id, run_cli=FakeRunner())
         self.assertEqual(report.op_id, op_id)
         self.assertEqual(paths.instructions.read_bytes(), original_bytes)
+
+    def test_normalize_instructions_text_enforces_exactly_one_trailing_newline(self):
+        from one_setup_all_agents.importer import _normalize_instructions_text
+
+        self.assertEqual(
+            _normalize_instructions_text("a\n\n"),
+            _normalize_instructions_text("a\n"),
+        )
+        self.assertEqual(_normalize_instructions_text("a\n\n"), "a\n")
+
+    def test_non_utf8_instructions_skipped_and_reported_and_not_adopted(self):
+        bad_path = self.home / "bad.md"
+        valid_path = self.home / "valid.md"
+        readings = [
+            ToolReading(
+                "claude", "Claude Code", Instructions(bad_path, "bad\ufffdtext\x00"), {}, (), ()
+            ),
+            ToolReading("codex", "Codex", Instructions(valid_path, "good text\n"), {}, (), ()),
+        ]
+        proposal = propose_instructions(readings)
+        self.assertIsNotNone(proposal)
+        self.assertEqual(proposal.core, "good text\n")
+        self.assertEqual(proposal.adopt, ["codex"])
+        self.assertNotIn("claude", proposal.adopt)
+        self.assertTrue(any("claude" in m and str(bad_path) in m for m in proposal.messages))
+
+    def test_dry_run_conflict_check_with_crlf_passes_owned_and_does_not_warn_left_alone(self):
+        adapter = all_adapters()[0]
+        paths = adapter.paths(self.env, Scope.GLOBAL)
+        paths.instructions.parent.mkdir(parents=True, exist_ok=True)
+        paths.instructions.write_bytes(b"hello world\r\n")
+        readings = [
+            ToolReading(
+                adapter.id,
+                adapter.label,
+                Instructions(paths.instructions, "hello world\r\n"),
+                {},
+                (),
+                (),
+            )
+        ]
+        adapters_map = {adapter.id: adapter}
+        proposal = propose_instructions(readings, env=self.env, adapters=adapters_map)
+        self.assertIsNotNone(proposal)
+        self.assertIn(adapter.id, proposal.adopt)
+        self.assertFalse(any("left alone" in m for m in proposal.messages))
 
 
 if __name__ == "__main__":

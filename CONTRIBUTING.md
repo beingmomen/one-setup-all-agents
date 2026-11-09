@@ -13,7 +13,7 @@ Python 3.11 or newer. The core has no runtime dependencies, and this will not ch
 
 ## Adding a tool adapter
 
-The architecture has one rule: **adapters detect, read and plan; they never write.** Only `engine/` writes files, backs them up, journals them and undoes them. That is what makes `undo` work the same for every tool. Read `docs/decisions/0008-adapter-engine-boundary.md` first.
+The architecture has one rule: **adapters detect, read and plan; they never write.** Only `engine/` writes files, backs them up, journals them and undoes them. That is what makes `undo` work the same for every tool. Read `docs/decisions/0008-adapter-engine-boundary.md` first. For a complete step-by-step walkthrough, see `docs/adding-a-tool.md`.
 
 A new tool is:
 
@@ -26,6 +26,7 @@ A new tool is:
    - If the tool cannot store a field of the neutral model, override `normalize_mcp` (or `normalize_instructions`) to say exactly which.
    - `notes()`: known limits worth showing to the user.
    - `import_notes(env, scope)`: optional notes on unimported secrets or settings during initialisation.
+   - `snapshot_files(env, scope)`: existing files of this tool to preserve in the safety snapshot before writes.
 2. **A registry entry** in `adapters/__init__.py`: one import line and one entry in the `ADAPTERS` tuple. Nothing else in that file changes.
 3. **A fixture**: a fake home directory with the tool's config files, under `tests/fixtures/`. Use neutral names (`example`, `demo-server`); no real paths, users or secrets.
 4. **The contract test** must pass for the adapter (`docs/decisions/0008` and `0009`). It is `tests/adapter_contract.py`, a reusable mixin, and `tests/test_adapter_contract.py` already creates a test class that runs the full suite for every adapter in `ADAPTERS`. Add a seed function for your fixture home to `REGISTERED_SEEDS` in that file only if the home should start with the user's own config (and a `REGISTERED_EXTRAS` entry only if your adapter plans `RunCli` ops or needs a different `make_env`, `unwritten_mcp` or `removable_mcp`). The suite checks, in a temporary home: reading what a plan produces returns the desired state (after the adapter's `normalize_*`), a second plan is empty, `plan_*` and `read_*` write nothing, entries that are not owned are left alone (a clash is a `Conflict`), owned entries that leave the source are removed, `paths()` stays under the given `Env`, every kind outside `capabilities` plans as `Unsupported`, every `RunCli` has an inverse, and undo restores the original bytes. Run it with `python -m unittest discover -s tests` (or `python -m unittest test_adapter_contract` from `tests/`). The suite applies and undoes your ops with the real engine (`tests/contract_applier.py`, one seam: `make_applier`, which calls `engine/`): journal, backups, atomic writes, drift check and ledger. A pass shows that, in a temporary home on the OS the tests run on, your ops are undone to the exact bytes, permission bits, links and ownership. **Caveat:** it does not prove anything about the real tool (where it keeps files, whether it follows links, what a real CLI does) or the `undo` command itself (Phase 5); `docs/decisions/0010-engine-v1.md` lists what is and is not proven.

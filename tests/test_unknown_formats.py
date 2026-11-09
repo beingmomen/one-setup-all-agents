@@ -2,9 +2,8 @@
 
 import unittest
 
-from tests.engine_support import EngineCase, FakeRunner
-
 import _bootstrap  # noqa: F401
+from engine_support import EngineCase, FakeRunner
 from one_setup_all_agents.adapters import ADAPTERS
 from one_setup_all_agents.engine.apply import apply_plan
 from one_setup_all_agents.model import (
@@ -36,6 +35,15 @@ class UnknownFormatsRefusalTests(EngineCase):
 
             # 1. Write garbage to MCP config file
             self.write(paths.mcp, GARBAGE_PAYLOAD)
+            if paths.instructions:
+                self.write(
+                    paths.instructions,
+                    f"# Valid Instructions for {adapter.id}\n".encode("utf-8"),
+                )
+            if paths.skills_dir:
+                valid_skill_dir = paths.skills_dir / "valid-skill"
+                valid_skill_dir.mkdir(parents=True, exist_ok=True)
+                (valid_skill_dir / "SKILL.md").write_text("# Valid Skill\n", encoding="utf-8")
             before_listing = self.listing(self.home)
 
             reading = read_tool(adapter, self.env)
@@ -48,6 +56,18 @@ class UnknownFormatsRefusalTests(EngineCase):
             self.assertNotIn(PLANTED_SECRET, prob.message, adapter.id)
             self.assertNotIn(PLANTED_SECRET, repr(reading), adapter.id)
             self.assertEqual(self.listing(self.home), before_listing, adapter.id)
+            if paths.instructions:
+                self.assertIsNotNone(reading.instructions, adapter.id)
+                self.assertEqual(
+                    reading.instructions.text,
+                    f"# Valid Instructions for {adapter.id}\n",
+                    adapter.id,
+                )
+            if paths.skills_dir:
+                self.assertTrue(
+                    any(s.name == "valid-skill" for s in reading.skills),
+                    f"Expected valid-skill in {adapter.id} skills: {reading.skills}",
+                )
 
             # 2. Planning MCP produces Conflict and no write/run op targeting the file
             plan_ops = adapter.plan_mcp(self.env, Scope.GLOBAL, {"demo": demo_server}, frozenset())
@@ -104,6 +124,11 @@ class UnknownFormatsRefusalTests(EngineCase):
 
         # Write garbage to the manifest path
         self.write(manifest_path, GARBAGE_PAYLOAD)
+        manifest_paths = manifest_adapter.paths(self.env, Scope.GLOBAL)
+        if manifest_paths.instructions:
+            self.write(manifest_paths.instructions, b"# Valid Antigravity Instructions\n")
+        if manifest_paths.mcp:
+            self.write(manifest_paths.mcp, b'{"mcpServers": {"demo": {"command": "bin"}}}\n')
         before_listing = self.listing(self.home)
 
         reading = read_tool(manifest_adapter, self.env)
@@ -113,6 +138,12 @@ class UnknownFormatsRefusalTests(EngineCase):
         self.assertNotIn(PLANTED_SECRET, prob.message)
         self.assertNotIn(PLANTED_SECRET, repr(reading))
         self.assertEqual(self.listing(self.home), before_listing)
+        if manifest_paths.instructions:
+            self.assertIsNotNone(reading.instructions)
+            self.assertEqual(reading.instructions.text, "# Valid Antigravity Instructions\n")
+        if manifest_paths.mcp:
+            self.assertIn("demo", reading.mcp)
+            self.assertEqual(reading.mcp["demo"].command, "bin")
 
         # Plan skills with garbage manifest
         plan_ops = manifest_adapter.plan_skills(self.env, Scope.GLOBAL, [test_skill], frozenset())

@@ -8,7 +8,6 @@ import unittest
 from unittest import mock
 
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
-from one_setup_all_agents._core import apply as applymod
 from one_setup_all_agents.engine import atomic
 from support import WorkDirCase
 
@@ -164,39 +163,6 @@ class AtomicWriteTests(WorkDirCase):
                 atomic.atomic_write(f, b"new")
         self.assertEqual(f.read_bytes(), b"old")
         self.assertEqual(self.leftovers(), [])
-
-
-class CoreUsesTheAtomicWriteTests(WorkDirCase):
-    """The ported core's own `atomic_write` is the ADR 0006 implementation (permissions kept, links followed)."""
-
-    @unittest.skipUnless(POSIX, "permission bits are a POSIX concept")
-    def test_core_write_keeps_permissions(self):
-        f = self.make_home() / "x.json"
-        f.write_bytes(b"{}")
-        os.chmod(f, 0o600)
-        applymod.atomic_write(f, b'{"a": 1}')
-        self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
-
-    def test_core_write_follows_a_symlink(self):
-        d = self.make_home()
-        if not can_symlink(d):
-            self.skipTest("symlinks are not available here")
-        real = d / "real.json"
-        real.write_bytes(b"{}")
-        link = d / "link.json"
-        os.symlink(real, link)
-        applymod.atomic_write(link, b'{"a": 1}')
-        self.assertTrue(link.is_symlink())
-        self.assertEqual(real.read_bytes(), b'{"a": 1}')
-
-    def test_core_write_reports_a_dangling_link_as_an_apply_error(self):
-        d = self.make_home()
-        if not can_symlink(d):
-            self.skipTest("symlinks are not available here")
-        link = d / "dangling.json"
-        os.symlink(d / "nope.json", link)
-        with self.assertRaises(applymod.ApplyError):
-            applymod.atomic_write(link, b"x")
 
 
 if __name__ == "__main__":

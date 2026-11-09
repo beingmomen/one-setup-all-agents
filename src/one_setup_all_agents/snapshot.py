@@ -36,21 +36,35 @@ def snapshot_ops(
                 continue
             seen_paths.add(path)
             try:
-                target = resolve_target(path)
-                if target.is_file():
+                is_symlink = path.is_symlink()
+                if is_symlink:
+                    target = resolve_target(path)
+                    if not target.exists():
+                        messages.append(f"snapshot skipped broken symlink: {path}")
+                        continue
+                    if not target.is_file():
+                        messages.append(f"snapshot skipped path that is not a regular file: {path}")
+                        continue
                     data = target.read_bytes()
-                    h = hashlib.sha256(data).hexdigest()
-                    ops.append(
-                        EditFile(
-                            path=path,
-                            transform=lambda old: old if old is not None else b"",
-                            expect_sha256=h,
-                            description="snapshot (no change)",
-                            sensitive=False,
-                        )
+                else:
+                    if not path.exists():
+                        # A missing file is skipped silently without warning
+                        continue
+                    if not path.is_file():
+                        messages.append(f"snapshot skipped path that is not a regular file: {path}")
+                        continue
+                    data = path.read_bytes()
+
+                h = hashlib.sha256(data).hexdigest()
+                ops.append(
+                    EditFile(
+                        path=path,
+                        transform=lambda old: old if old is not None else b"",
+                        expect_sha256=h,
+                        description="snapshot (no change)",
+                        sensitive=False,
                     )
-                elif path.is_symlink() or not target.exists():
-                    messages.append(f"snapshot skipped non-regular file or dangling link: {path}")
+                )
             except Exception as exc:
                 messages.append(f"snapshot skipped unreadable path {path}: {exc}")
 

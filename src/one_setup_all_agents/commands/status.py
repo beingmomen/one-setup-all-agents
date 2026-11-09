@@ -76,7 +76,10 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
     try:
         source_config = load_source(ctx.env.config_dir, list(adapters_by_id.keys()))
     except SourceError as exc:
-        warn(ctx, str(exc))
+        if is_json:
+            say(ctx, json.dumps({"schema": 1, "error": str(exc)}, indent=2))
+        else:
+            warn(ctx, str(exc))
         return 1
 
     # 3. Detect tools and read configurations
@@ -229,13 +232,7 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
     undoable_count = 0
     if ctx.env.state_dir.is_dir():
         try:
-            undoable_count = len(
-                [
-                    op
-                    for op in journal.list_operations(ctx.env.state_dir)
-                    if op.get("status") == journal.DONE
-                ]
-            )
+            undoable_count = len(journal.list_undoable(ctx.env.state_dir))
         except Exception:
             undoable_count = 0
 

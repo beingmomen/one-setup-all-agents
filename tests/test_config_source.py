@@ -5,11 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.demo_tool_adapter import DemoToolAdapter
-from tests.engine_support import make_env
-from tests.support import FIXTURE_SECRETS
-
 import _bootstrap  # noqa: F401
+from demo_tool_adapter import DemoToolAdapter
+from engine_support import make_env
 from one_setup_all_agents import config_source
 from one_setup_all_agents.config_source import (
     INSTRUCTIONS_NAME,
@@ -29,6 +27,7 @@ from one_setup_all_agents.config_source import (
 )
 from one_setup_all_agents.engine.plan import build_plan
 from one_setup_all_agents.model import HeaderRef, McpServer
+from support import FIXTURE_SECRETS
 
 PLANTED_SECRET = FIXTURE_SECRETS[0]
 
@@ -153,7 +152,8 @@ class ConfigSourceTests(unittest.TestCase):
         )
         with self.assertRaises(SourceError) as ctx:
             load_source(self.config_dir, self.adapter_ids)
-        self.assertIn("unknown tool id 'unknown_tool'", str(ctx.exception))
+        self.assertNotIn("unknown_tool", str(ctx.exception))
+        self.assertIn("position #", str(ctx.exception))
 
     def test_refuse_unknown_tool_id_in_mcp_servers(self):
         (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
@@ -169,7 +169,8 @@ class ConfigSourceTests(unittest.TestCase):
         (self.config_dir / MCP_NAME).write_text(mcp_content, encoding="utf-8")
         with self.assertRaises(SourceError) as ctx:
             load_source(self.config_dir, self.adapter_ids)
-        self.assertIn("unknown tool id 'non_existent_tool'", str(ctx.exception))
+        self.assertNotIn("non_existent_tool", str(ctx.exception))
+        self.assertIn("position #", str(ctx.exception))
 
     def test_refuse_literal_token_in_headers_and_no_secret_leak(self):
         (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
@@ -398,6 +399,205 @@ class ConfigSourceTests(unittest.TestCase):
         desired = desired_for(cfg, adapter.id)
         plan = build_plan(env, [adapter], desired)
         self.assertIsNotNone(plan)
+        matching_ops = [
+            op
+            for op in plan.executable
+            if any(ref.key == "srv" for ref in getattr(op, "claims", ()))
+        ]
+        self.assertGreater(len(matching_ops), 0)
+        self.assertEqual(matching_ops[0].claims[0].key, "srv")
+
+    def test_strict_types_args_must_be_list_of_strings(self):
+        (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        (self.config_dir / MCP_NAME).write_text(
+            '{"version": 1, "servers": {"s": {"command": "echo", "args": "not-a-list"}}}',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SourceError) as ctx:
+            load_source(self.config_dir, self.adapter_ids)
+        self.assertIn("args", str(ctx.exception))
+
+        (self.config_dir / MCP_NAME).write_text(
+            '{"version": 1, "servers": {"s": {"command": "echo", "args": ["ok", 123]}}}',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SourceError) as ctx:
+            load_source(self.config_dir, self.adapter_ids)
+        self.assertIn("args", str(ctx.exception))
+
+    def test_strict_types_cwd_must_be_string(self):
+        (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        (self.config_dir / MCP_NAME).write_text(
+            '{"version": 1, "servers": {"s": {"command": "echo", "cwd": 123}}}',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SourceError) as ctx:
+            load_source(self.config_dir, self.adapter_ids)
+        self.assertIn("cwd", str(ctx.exception))
+
+    def test_strict_types_url_and_command_exclusivity_and_non_empty(self):
+        (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        # Both url and command
+        (self.config_dir / MCP_NAME).write_text(
+            '{"version": 1, "servers": {"s": {"command": "echo", "url": "http://example.com"}}}',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SourceError):
+            load_source(self.config_dir, self.adapter_ids)
+
+        # Neither
+        (self.config_dir / MCP_NAME).write_text(
+            '{"version": 1, "servers": {"s": {"cwd": "/tmp"}}}',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SourceError):
+            load_source(self.config_dir, self.adapter_ids)
+
+        # Empty command
+        (self.config_dir / MCP_NAME).write_text(
+            '{"version": 1, "servers": {"s": {"command": "   "}}}',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SourceError):
+            load_source(self.config_dir, self.adapter_ids)
+
+        # Empty url
+        (self.config_dir / MCP_NAME).write_text(
+            '{"version": 1, "servers": {"s": {"url": ""}}}',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SourceError):
+            load_source(self.config_dir, self.adapter_ids)
+
+    def test_strict_types_startup_timeout_sec_positive_number_not_bool(self):
+        (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        # bool True
+        (self.config_dir / MCP_NAME).write_text(
+            '{"version": 1, "servers": {"s": {"command": "echo", "startup_timeout_sec": true}}}',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SourceError):
+            load_source(self.config_dir, self.adapter_ids)
+
+        # zero or negative
+        (self.config_dir / MCP_NAME).write_text(
+            '{"version": 1, "servers": {"s": {"command": "echo", "startup_timeout_sec": 0}}}',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SourceError):
+            load_source(self.config_dir, self.adapter_ids)
+
+    def test_strict_types_auth_only_oauth_none_or_absent(self):
+        (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        (self.config_dir / MCP_NAME).write_text(
+            '{"version": 1, "servers": {"s": {"command": "echo", "auth": "bearer"}}}',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SourceError):
+            load_source(self.config_dir, self.adapter_ids)
+
+    def test_strict_types_skills_exclude_items_must_be_strings(self):
+        (self.config_dir / SOURCE_CONFIG_NAME).write_text(
+            "[tools.example]\nenabled = true\nskills_exclude = [123]\nversion = 1\n",
+            encoding="utf-8",
+        )
+        with self.assertRaises(SourceError):
+            load_source(self.config_dir, self.adapter_ids)
+
+    def test_strict_types_version_int_not_bool(self):
+        # bool version in config.toml
+        (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = true\n", encoding="utf-8")
+        with self.assertRaises(SourceError):
+            load_source(self.config_dir, self.adapter_ids)
+
+        # bool version in mcp.jsonc
+        (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        (self.config_dir / MCP_NAME).write_text(
+            '{"version": true, "servers": {}}',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SourceError):
+            load_source(self.config_dir, self.adapter_ids)
+
+    def test_strict_types_tools_items_must_be_strings(self):
+        (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        (self.config_dir / MCP_NAME).write_text(
+            '{"version": 1, "servers": {"s": {"command": "echo", "tools": [123]}}}',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SourceError):
+            load_source(self.config_dir, self.adapter_ids)
+
+    def test_strict_types_headers_only_on_http_and_env_only_on_stdio(self):
+        (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        # headers on stdio
+        (self.config_dir / MCP_NAME).write_text(
+            '{"version": 1, "servers": {"s": {"command": "echo", "headers": {"X-Test": "${TEST}"}}}}',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SourceError):
+            load_source(self.config_dir, self.adapter_ids)
+
+        # env on http
+        (self.config_dir / MCP_NAME).write_text(
+            '{"version": 1, "servers": {"s": {"url": "https://example.com", "env": {"VAR": "val"}}}}',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SourceError):
+            load_source(self.config_dir, self.adapter_ids)
+
+    def test_unreadable_instructions_or_skills_raises_clean_source_error(self):
+        (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        (self.config_dir / INSTRUCTIONS_NAME).write_bytes(b"\xff\xfe\x00\x80\x81")
+        with self.assertRaises(SourceError) as ctx:
+            load_source(self.config_dir, self.adapter_ids)
+        self.assertEqual(str(ctx.exception), f"cannot read '{INSTRUCTIONS_NAME}'")
+
+        (self.config_dir / INSTRUCTIONS_NAME).write_text("# Valid\n", encoding="utf-8")
+        (self.config_dir / "instructions.example.md").write_bytes(b"\xff\xfe\x00\x80\x81")
+        with self.assertRaises(SourceError) as ctx:
+            load_source(self.config_dir, self.adapter_ids)
+        self.assertEqual(str(ctx.exception), "cannot read 'instructions.example.md'")
+
+    def test_unknown_tool_id_message_names_position_not_value(self):
+        secret_tool = "SECRET_TOOL_ID_XYZ"
+        (self.config_dir / SOURCE_CONFIG_NAME).write_text(
+            f"version = 1\n[tools.{secret_tool}]\nenabled = true\n",
+            encoding="utf-8",
+        )
+        with self.assertRaises(SourceError) as ctx:
+            load_source(self.config_dir, self.adapter_ids)
+        self.assertNotIn(secret_tool, str(ctx.exception))
+        self.assertIn("position", str(ctx.exception).lower())
+
+        (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        (self.config_dir / MCP_NAME).write_text(
+            f'{{"version": 1, "servers": {{"s": {{"command": "echo", "tools": ["{secret_tool}"]}}}}}}',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SourceError) as ctx:
+            load_source(self.config_dir, self.adapter_ids)
+        self.assertNotIn(secret_tool, str(ctx.exception))
+        self.assertIn("position", str(ctx.exception).lower())
+
+    def test_renderer_skills_exclude_uses_json_dumps(self):
+        tools = {
+            "example": ToolSettings(enabled=True, skills_exclude=('skip"quoted"',)),
+        }
+        rendered = render_source_config(tools)
+        self.assertIn(r'skills_exclude = ["skip\"quoted\""]', rendered)
+
+    def test_renderer_notes_emitted_per_server_and_escapes_newlines(self):
+        entries = {
+            "srv1": ServerEntry(server=McpServer(name="srv1", command="echo")),
+            "srv2": ServerEntry(server=McpServer(name="srv2", command="echo")),
+        }
+        notes = {
+            "srv1": ["note with\nnewline and\r\ncarriage"],
+        }
+        rendered = render_mcp_source(entries, notes=notes)
+        self.assertNotIn("newline and\n", rendered)
+        self.assertIn("note with newline and carriage", rendered)
 
     def test_fixture_source_loads_cleanly(self):
         fixture_dir = Path(__file__).parent / "fixtures" / "source"

@@ -33,20 +33,26 @@ The `all-agents sync` command reconciles the shared source configuration with ev
       - In non-interactive mode: print "Dry run only: not interactive; pass --yes to apply" and exit 0.
       - In interactive mode: prompt for confirmation ("Apply N change(s)?"). If declined, exit 0.
 12. **Execution:**
-    - Trigger journal pruning (placeholder for M05-T3.3).
     - Apply the plan via `apply_plan(env, plan, label="sync", run_cli=ctx.run_cli)`.
     - Handle `EngineLockedError`, `OpenOperationError`, `ApplyError`, `PlanError`: display error message and exit 1.
-    - If successful, report the operation ID.
+    - If successful, trigger journal retention pruning and report the operation ID.
 13. **Re-plan verification:**
     - Re-run `build_plan` on the same scope. If executable operations still remain, warn that changes are still pending.
     - If unresolved conflicts exist, exit 3. Otherwise exit 0.
 
 ### 2. Flags and CLI interface
 
-- `--yes`: Proceed with application without interactive confirmation.
-- `--dry-run`: Show preview of proposed changes and exit without modifying anything.
-- `--tool <ID>` (repeatable): Limit operations to one or more tool identifiers.
-- `--only <KIND>` (repeatable): Limit operations to specific configuration kinds (`instructions`, `mcp`, `skills`).
+- **`sync`:**
+  - `--yes`: Proceed with application without interactive confirmation.
+  - `--dry-run`: Show preview of proposed changes and exit without modifying anything.
+  - `--tool <ID>` (repeatable): Limit operations to one or more tool identifiers.
+  - `--only <KIND>` (repeatable): Limit operations to specific configuration kinds (`instructions`, `mcp`, `skills`).
+- **`status`:**
+  - `--json`: Output machine-readable JSON status schema.
+  - `--versions`: Probe installed tool executables to determine exact version strings.
+- **`undo`:**
+  - `--yes`: Revert without interactive prompt.
+  - `--force`: Force revert even if unmanaged file drift is detected.
 
 ### 3. Exit codes
 
@@ -56,10 +62,10 @@ The `all-agents sync` command reconciles the shared source configuration with ev
   - `3`: Unresolved conflicts remain in the plan (both during dry-run and after apply).
 - **`all-agents status`:**
   - `0`: In sync (no pending operations or differences).
-  - `1`: Error (corrupted configs, unreadable files).
+  - `1`: Error (uninitialised, corrupted source config, or unreadable files).
   - `2`: Differences or conflicts exist.
 - **`all-agents undo`:**
-  - `0`: Successful revert.
+  - `0`: Successful revert or nothing to undo.
   - `1`: Refusal, error, or unforced drift detected.
 
 ### 4. Output shape and secret safety
@@ -68,32 +74,108 @@ The `all-agents sync` command reconciles the shared source configuration with ev
 - Plan rendering groups operations logically, distinguishing created, modified, relinked, and conflicting items.
 - Secret values never appear in preview output, journal summaries, or command logs.
 
-### 5. Status JSON schema (Milestone M05-T2 preview)
+### 5. Status JSON schema
 
-`all-agents status --json` emits structured JSON containing:
-- `tools`: map of tool ID to tool status (`status`, `installed`, `binary`, `version`, `config_roots`).
-- `kinds`: per-tool status for instructions, mcp, and skills.
-- `in_sync`: boolean flag indicating whether all tools match shared source.
-- `conflicts`: list of active conflicts.
+`all-agents status --json` emits structured JSON adhering to format version 1:
 
-### 6. Undo semantics and retention (Milestone M05-T3 preview)
+1. **Uninitialised state (exit 1):**
+```json
+{
+  "schema": 1,
+  "initialised": false,
+  "tools": [],
+  "undoable_operations": 0
+}
+```
 
-`all-agents undo` reverses operations recorded in `state/ops/` using the write-ahead journal:
-- Reverts operations in reverse chronological order.
-- Detects unmanaged file drift before reverting, refusing unless `--force` is supplied.
-- Journal retention preserves up to 20 past operations, pruning older operations safely.
+2. **Source configuration error (exit 1):**
+```json
+{
+  "schema": 1,
+  "error": "config.toml: [tools.unknown] is not a registered tool"
+}
+```
+
+3. **Active configuration state (exit 0 if in sync, exit 2 if differences/conflicts):**
+```json
+{
+  "schema": 1,
+  "initialised": true,
+  "tools": [
+    {
+      "id": "claude",
+      "label": "Claude Code",
+      "state": "in sync",
+      "version": "1.0.0",
+      "binary": "/usr/local/bin/claude",
+      "warnings": [],
+      "kinds": {
+        "instructions": {
+          "state": "in sync",
+          "items": [],
+          "reasons": []
+        },
+        "mcp": {
+          "state": "differs",
+          "items": ["server1"],
+          "reasons": []
+        },
+        "skills": {
+          "state": "in sync",
+          "items": [],
+          "reasons": []
+        }
+      }
+    }
+  ],
+  "undoable_operations": 3
+}
+```
+- Tool states: `"not installed"`, `"disabled"`, `"unreadable"`, `"conflict"`, `"differs"`, `"in sync"`.
+- Kind states: `"not installed"`, `"disabled"`, `"unreadable"`, `"conflict"`, `"differs"`, `"unsupported"`, `"in sync"`.
+- Paths in `binary` and `warnings` mask user home directories (`~`) and credentials.
+
+### 6. Undo semantics, additive journal fields, and safety copies
+
+- **Undo as `kind: "undo"`:** An undo operation executes an inverse plan that reverts a target operation. It opens a journal operation with `kind: "undo"` and `undoes: <target_op_id>`.
+- **Safety copies and no redo:** Before modifying or unlinking files during an undo, write-ahead safety copies are created in the undo operation directory. Reverting an operation is irreversible in the forward direction: there is no `redo` command.
+- **Additive journal fields:** Operations in `state/ops/<op_id>/metadata.json` and the ledger in `state/ledger.json` introduce two additive optional fields:
+  - `kind`: `"apply"` or `"undo"` (defaults to `"apply"` for legacy entries).
+  - `undoes`: string ID of the operation being reverted (only present when `kind == "undo"`).
+  Old journals without these fields load transparently without migrations; format version remains 1.
+- **Amendment to ADR 0005:** ADR 0005 stated that "every operation can be undone". This is clarified: only apply operations (`kind: "apply"`) can be undone; undo operations (`kind: "undo"`) and operations with unforced external file drift cannot be undone.
+
+### 7. Stack ordering, recovery, and retention policy
+
+- **Monotonic sequence ordering:** Operations in the journal are strictly ordered by sequential ledger append order, ensuring newest-first resolution even when multiple operations occur within the same second.
+- **FIX-T2 recovery rule:** If an undo operation is interrupted (Ctrl+C, crash, or step failure), its open entry records `after` states equal to the target's `before` states. During subsequent recovery, `recover_locked` recognizes these partially restored files as expected progress rather than external drift, allowing `undo` to resume cleanly without wedging the journal.
+- **Retention pruning:**
+  - Automatic trigger: Pruning runs automatically after successful `apply` and `undo` operations.
+  - Count threshold: Only `done` apply operations count toward the retention limit of `keep=20`.
+  - Cascading cleanup: Non-apply operations (`undone`, `undo`, and `failed`) are pruned only when older than the oldest kept `done` apply operation.
+  - Initial snapshot pinning: The initial `init` snapshot operation is permanently pinned (`pinned: true`) and is never pruned, guaranteeing a perpetual rollback path to pre-installation baseline.
+  - Error visibility: Pruning errors or warnings (e.g. unmanaged files in backup folders) are surfaced to stderr, never swallowed silently.
 
 ## Reason
 
-- Explicit preview and interactive confirmation ensure users always know what changes will be applied to tool configuration files before they happen.
-- Distinct exit codes (specifically code 3 for unresolved conflicts) enable scripting and CI integration without masking hard errors.
-- Re-planning immediately after apply provides verification that changes took effect as intended.
+- Clear, structured JSON output enables robust tooling and CI automation without parsing terminal color codes.
+- Additive journal schema evolution preserves 100% backward compatibility with pre-existing engine states.
+- Pinning the initial snapshot guarantees user safety: even after dozens of sync iterations, the user can always restore their exact original tool configuration.
 
 ## Options considered
 
-- **Option A (Exit code 1 for conflicts):** Rejected because distinguishing environmental errors (locks, bad syntax) from deliberate user conflicts (unowned external files) is essential for automated workflows.
-- **Option B (Automatic apply in non-interactive mode):** Rejected for safety; non-interactive executions must require explicit `--yes` to prevent accidental overwrites in automated scripts.
+- **Exit code for conflicts:**
+  - **Option A (Exit code 3, Chosen):** Explicit exit code distinguishing environmental errors (1) from intentional unmanaged user configurations (3).
+  - **Option B (Exit code 1 for conflicts):** Rejected because CI pipelines cannot distinguish syntax/IO failures from unowned file conflicts.
+- **Undo architecture:**
+  - **Option A (One-way undo stack with pinned init snapshot, Chosen):** Provides clean, predictable rollbacks with zero risk of infinite undo/redo tree loops.
+  - **Option B (Bidirectional undo/redo DAG):** Rejected because maintaining redo state across arbitrary file edits outside the tool introduces severe complexity and data corruption risks.
+- **Journal schema migration:**
+  - **Option A (Additive optional fields, Chosen):** Kept format version 1 with fallback defaults for `kind` and `undoes`.
+  - **Option B (Format version bump to 2 with migration script):** Rejected because additive fields require no migration and maintain total backward compatibility.
 
 ## Open points
 
-None.
+1. **Selective non-head undo:** Assessing whether `all-agents undo <OP_ID>` should be supported for arbitrary past operations when file change sets do not intersect.
+2. **Interactive visual diff in `status`:** Evaluating an optional `--diff` flag for `all-agents status` to print side-by-side unified diffs of divergent instructions and MCP server configs.
+3. **Configurable retention limit:** Evaluating whether `keep=20` should be configurable via `config.toml` for storage-constrained environments.

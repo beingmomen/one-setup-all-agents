@@ -66,6 +66,11 @@ class HelpTests(unittest.TestCase):
                 "advanced options:", out.lower(), f"missing advanced options group in {command}"
             )
 
+    def test_epilog_status(self):
+        _, out, _ = _run_main(["--help"])
+        self.assertIn("Status: pre-alpha.", out)
+        self.assertNotIn("The commands above are not usable yet.", out)
+
 
 class HiddenCommandTests(unittest.TestCase):
     def test_internal_commands_are_not_listed_in_help(self):
@@ -74,9 +79,6 @@ class HiddenCommandTests(unittest.TestCase):
         self.assertNotIn("_legacy", out)
 
     def test_internal_commands_dispatch(self):
-        code, out, _ = _run_main(["_legacy", "--help"])
-        self.assertEqual(code, 0)
-        self.assertIn("status", out)
         code, _, err = _run_main(["_run"])
         self.assertEqual(code, 2)  # usage error from the runner, not "not implemented"
         self.assertIn("usage", err)
@@ -85,6 +87,9 @@ class HiddenCommandTests(unittest.TestCase):
 class PreAlphaBehaviorTests(unittest.TestCase):
     def test_commands_report_not_implemented_and_change_nothing(self):
         self.assertEqual(STUB_COMMANDS, ())
+        for command in COMMANDS:
+            code, out, _ = _run_main([command, "--help"])
+            self.assertEqual(code, 0)
 
 
 class ModuleEntryPointTests(unittest.TestCase):

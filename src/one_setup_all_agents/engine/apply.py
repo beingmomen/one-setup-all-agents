@@ -22,7 +22,7 @@ adapters' source of truth; it only runs the ops it is given.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from .._core.mask import mask_args, mask_text
@@ -251,6 +251,8 @@ def apply_plan(
     adopt: Sequence[ItemRef] = (),
     run_cli: Runner | None = None,
     lock_timeout: float = 0.0,
+    pinned: bool = False,
+    warn: Callable[[str], None] | None = None,
 ) -> str | None:
     """Execute `plan` and return the id of the journal operation that records it.
 
@@ -270,7 +272,7 @@ def apply_plan(
         unfinished = journal.find_unfinished(env.state_dir)
         if unfinished:
             raise OpenOperationError(unfinished)
-        op = journal.begin(env.state_dir, label)
+        op = journal.begin(env.state_dir, label, pinned=pinned)
         run = _Run(env, op, runner, adopt=adopt)
         try:
             for item in ops:
@@ -278,10 +280,10 @@ def apply_plan(
             run.finish()
         except BaseException as exc:
             _fail_run(env, op, runner, exc)
-        try:
-            journal.prune(env.state_dir)
-        except OSError:
-            pass
+        prune_warnings = journal.prune(env.state_dir)
+        if warn:
+            for w in prune_warnings:
+                warn(w)
         return op.id
 
 
@@ -311,17 +313,26 @@ def _fail_run(env: Env, op: journal.Operation, runner: Runner, exc: BaseExceptio
     ) from exc
 
 
-def recover_locked(env: Env, runner: Runner) -> list[str]:
+def recover_locked(env: Env, runner: Runner, *, force: bool = False) -> list[str]:
     """Put right every unfinished operation for a caller that already holds the lock."""
     recovered = []
     for op_id in reversed(journal.find_unfinished(env.state_dir)):
-        revert_locked(env, journal.load(env.state_dir, op_id), runner)
-        recovered.append(op_id)
+        op = journal.load(env.state_dir, op_id)
+        if op.kind == "undo" and op.undoes:
+            target_op = journal.load(env.state_dir, op.undoes)
+            revert_locked(env, target_op, runner, force=force)
+            op.set_status(journal.DONE)
+            op.data["pending_revert"] = False
+            op.save()
+            recovered.append(op_id)
+        else:
+            revert_locked(env, op, runner, force=force)
+            recovered.append(op_id)
     return recovered
 
 
 def recover_operation(
-    env: Env, *, run_cli: Runner | None = None, lock_timeout: float = 0.0
+    env: Env, *, force: bool = False, run_cli: Runner | None = None, lock_timeout: float = 0.0
 ) -> list[str]:
     """Put right every unfinished operation (a crash left it `open`), newest first.
 
@@ -331,4 +342,4 @@ def recover_operation(
     """
     runner = run_cli or default_runner(env)
     with engine_lock(env.state_dir, timeout=lock_timeout):
-        return recover_locked(env, runner)
+        return recover_locked(env, runner, force=force)

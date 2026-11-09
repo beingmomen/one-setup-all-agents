@@ -7,8 +7,6 @@ from unittest import mock
 
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
 from one_setup_all_agents import paths
-from one_setup_all_agents._core import locations
-from support import WorkDirCase
 
 HOME = Path("/h") if os.name != "nt" else Path("C:/h")
 
@@ -83,35 +81,6 @@ class PathsTests(unittest.TestCase):
         ):
             with mock.patch.object(paths.sys, "platform", sys_platform):
                 self.assertEqual(paths.detect_platform(), expected)
-
-
-class IsolationTests(WorkDirCase):
-    """A fake home must never reach the real state or config directory, whatever the real environment says."""
-
-    def test_a_fake_home_ignores_the_real_xdg_and_appdata_variables(self):
-        fake = self.make_home() / "home"
-        fake.mkdir()
-        real_looking = self.make_home() / "somewhere-else"
-        env = {
-            "XDG_STATE_HOME": str(real_looking),
-            "XDG_CONFIG_HOME": str(real_looking),
-            "LOCALAPPDATA": str(real_looking),
-            "APPDATA": str(real_looking),
-        }
-        with mock.patch.dict(os.environ, env):
-            for d in (
-                locations.state_root(fake),
-                locations.config_root(fake),
-                locations.backups_dir(fake),
-            ):
-                self.assertTrue(str(d).startswith(str(fake)), d)
-
-    def test_the_explicit_state_override_is_still_honored(self):
-        fake = self.make_home() / "home"
-        fake.mkdir()
-        target = self.make_home() / "redirected"
-        with mock.patch.dict(os.environ, {paths.ENV_STATE_DIR: str(target)}):
-            self.assertEqual(locations.state_root(fake), target)
 
 
 if __name__ == "__main__":

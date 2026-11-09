@@ -11,9 +11,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.engine_support import FakeRunner, can_make_dir_link, make_env
-
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
+from engine_support import FakeRunner, can_make_dir_link, make_env
 from one_setup_all_agents.adapters import all_adapters
 from one_setup_all_agents.adapters.base import ToolAdapter
 from one_setup_all_agents.cli import build_parser

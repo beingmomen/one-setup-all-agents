@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from .._core.mask import mask_text
 from ..model import Env
 from . import backup, journal, revert
 from .apply import recover_locked
@@ -24,6 +25,8 @@ class UndoResult:
     recovered: list[str]
     undo_op_id: str
     remaining: int
+    reverted_descriptions: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 def undo(
@@ -42,11 +45,51 @@ def undo(
     runner = run_cli or default_runner(env)
     with engine_lock(env.state_dir, timeout=lock_timeout):
         # (a) Recover unfinished operations
-        recovered = recover_locked(env, runner)
+        recovered = recover_locked(env, runner, force=force)
+
+        # Check if an unfinished undo operation was recovered
+        recovered_undo_op = None
+        for r_id in recovered:
+            try:
+                r_op = journal.load(env.state_dir, r_id)
+                if r_op.kind == "undo" and r_op.undoes:
+                    recovered_undo_op = r_op
+                    break
+            except Exception:
+                pass
+
+        if recovered_undo_op is not None:
+            target_op = journal.load(env.state_dir, recovered_undo_op.undoes)
+            remaining = len(journal.list_undoable(env.state_dir))
+            reverted_seqs = [e["seq"] for e in target_op.entries if e.get("reverted")]
+            prune_warnings = journal.prune(env.state_dir)
+            return UndoResult(
+                op_id=target_op.id,
+                label=target_op.label,
+                reverted_entries=reverted_seqs,
+                recovered=recovered,
+                undo_op_id=recovered_undo_op.id,
+                remaining=remaining,
+                reverted_descriptions=[
+                    e.get("description") or f"entry #{e['seq']}"
+                    for e in target_op.entries
+                    if e.get("reverted") and e.get("description")
+                ],
+                warnings=list(prune_warnings),
+            )
 
         # (b) Get undoable operations
         undoable = journal.list_undoable(env.state_dir)
         if not undoable:
+            if recovered:
+                return UndoResult(
+                    op_id="",
+                    label="",
+                    reverted_entries=[],
+                    recovered=recovered,
+                    undo_op_id="",
+                    remaining=0,
+                )
             return None
 
         # (c) Target newest undoable operation
@@ -66,6 +109,19 @@ def undo(
                     drifted=drifted,
                 )
 
+        # Validate and describe every path BEFORE journal.begin
+        # If any path causes BackupError, it is raised BEFORE the undo operation
+        # is created on disk, keeping disk and journal untouched.
+        path_states: list[tuple[dict, Path | None, dict | None]] = []
+        for entry in pending:
+            entry_type = entry.get("type")
+            if entry_type in ("edit_file", "link"):
+                p = Path(entry.get("real_path") or entry.get("path"))
+                current_state = backup.describe(p)
+                path_states.append((entry, p, current_state))
+            else:
+                path_states.append((entry, None, None))
+
         # (e) Create undo operation and record safety copies
         undo_op = journal.begin(
             env.state_dir,
@@ -75,11 +131,9 @@ def undo(
         )
 
         slot = 1
-        for entry in pending:
+        for entry, p, current_state in path_states:
             entry_type = entry.get("type")
-            if entry_type in ("edit_file", "link"):
-                p = Path(entry.get("real_path") or entry.get("path"))
-                current_state = backup.describe(p)
+            if entry_type in ("edit_file", "link") and p is not None and current_state is not None:
                 if current_state["state"] in ("file", "copy_tree"):
                     before = backup.capture(
                         env.state_dir, undo_op.id, p, slot, current=current_state
@@ -92,24 +146,43 @@ def undo(
                         "type": entry_type,
                         "path": str(p),
                         "before": before,
+                        "after": entry.get("before"),
                         "status": journal.ENTRY_DONE,
                     }
                 )
                 slot += 1
 
         # (f) Execute revert
-        report = revert.revert_locked(env, target_op, runner, force=force)
-
-        # (g) Mark undo_op status DONE
-        undo_op.set_status(journal.DONE)
-
         try:
-            journal.prune(env.state_dir)
-        except OSError:
-            pass
+            target_op.data["pending_revert"] = True
+            target_op.save()
+            report = revert.revert_locked(env, target_op, runner, force=force)
+            undo_op.set_status(journal.DONE)
+            undo_op.data["pending_revert"] = False
+            undo_op.save()
+            target_op.data["pending_revert"] = False
+            target_op.save()
+        except BaseException as exc:
+            undo_op.set_status(
+                journal.FAILED,
+                error=mask_text(f"{type(exc).__name__}: {exc}"),
+                pending_revert=True,
+            )
+            target_op.data["pending_revert"] = True
+            target_op.save()
+            raise
+
+        prune_warnings = journal.prune(env.state_dir)
 
         # (h) Count remaining
         remaining = len(journal.list_undoable(env.state_dir))
+
+        reverted_set = set(report.reverted)
+        reverted_descriptions = [
+            e.get("description") or f"entry #{e['seq']}"
+            for e in target_op.entries
+            if e.get("seq") in reverted_set and e.get("description")
+        ]
 
         # (i) Return UndoResult
         return UndoResult(
@@ -119,4 +192,6 @@ def undo(
             recovered=recovered,
             undo_op_id=undo_op.id,
             remaining=remaining,
+            reverted_descriptions=reverted_descriptions,
+            warnings=list(prune_warnings),
         )

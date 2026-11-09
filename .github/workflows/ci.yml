@@ -71,11 +71,32 @@ jobs:
         run: python -m pip install .
       - name: Smoke
         env:
+          HOME: ${{ runner.temp }}/fake-home
+          USERPROFILE: ${{ runner.temp }}/fake-home
+          APPDATA: ${{ runner.temp }}/fake-appdata
+          LOCALAPPDATA: ${{ runner.temp }}/fake-localappdata
+          XDG_CONFIG_HOME: ${{ runner.temp }}/fake-xdg-config
+          XDG_STATE_HOME: ${{ runner.temp }}/fake-xdg-state
           ALL_AGENTS_CONFIG_DIR: ${{ runner.temp }}/all-agents-config
           ALL_AGENTS_STATE_DIR: ${{ runner.temp }}/all-agents-state
         shell: bash
         run: |
+          mkdir -p "$HOME"
           all-agents --version
-          all-agents init --dry-run
           one-setup-all-agents --help
-          python -m one_setup_all_agents status || [ $? -eq 2 ]
+
+          set +e
+          out_init=$(all-agents init --dry-run 2>&1)
+          rc_init=$?
+          set -e
+          echo "$out_init"
+          test $rc_init -eq 0
+          echo "$out_init" | grep -F "No supported tool was found. Nothing to import."
+
+          set +e
+          out_status=$(python -m one_setup_all_agents status 2>&1)
+          rc_status=$?
+          set -e
+          echo "$out_status"
+          test $rc_status -eq 1
+          echo "$out_status" | grep -F 'not initialised: run `all-agents init`'

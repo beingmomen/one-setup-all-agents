@@ -95,6 +95,7 @@ from __future__ import annotations
 import json
 import os
 import posixpath
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -646,20 +647,24 @@ class AntigravityAdapter(ToolAdapter):
         except ConfigUnreadable:
             return []
         notes: list[ImportNote] = []
+        _header_var_re = re.compile(r"^(?:[A-Za-z]+ )?\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
         for name, entry in sorted(config.members.items()):
             if not isinstance(entry, Mapping):
                 continue
             raw_headers = entry.get("headers")
             if isinstance(raw_headers, Mapping):
-                for key in sorted(raw_headers.keys()):
-                    notes.append(
-                        ImportNote(
-                            tool=self.id,
-                            server=name,
-                            field="header",
-                            name=str(key),
+                for key, value in sorted(raw_headers.items()):
+                    if isinstance(value, str):
+                        if _header_var_re.match(value.strip()):
+                            continue
+                        notes.append(
+                            ImportNote(
+                                tool=self.id,
+                                server=name,
+                                field="header",
+                                name=str(key),
+                            )
                         )
-                    )
             environment = entry.get("env")
             if isinstance(environment, Mapping):
                 for key, value in sorted(environment.items()):

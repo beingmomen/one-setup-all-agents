@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import tempfile
 from collections.abc import Sequence
+from pathlib import Path
 
 from ..adapters import ADAPTERS, all_adapters
-from ..config_source import SOURCE_CONFIG_NAME, desired_all, load_source
+from ..config_source import SOURCE_CONFIG_NAME, SourceError, desired_all, load_source
 from ..context import CommandContext
 from ..detect import detect_all, render_detections
 from ..engine.apply import apply_plan
@@ -20,7 +22,7 @@ from ..engine.errors import (
 )
 from ..engine.plan import build_plan
 from ..importer import propose, source_ops
-from ..model import Detection, ItemRef, Plan
+from ..model import Detection, EditFile, ItemRef, Link, Plan
 from ..reader import read_all
 from ..snapshot import snapshot_ops
 from ..ui import confirm, say, warn
@@ -30,9 +32,9 @@ def _check_adopted_replan(
     ctx: CommandContext,
     detections: Sequence[Detection],
     adopted: Sequence[ItemRef],
-) -> None:
+) -> int:
     if not adopted or not (ctx.env.config_dir / SOURCE_CONFIG_NAME).exists():
-        return
+        return 0
     try:
         installed_adapters = [
             a for a in all_adapters() if any(d.tool == a.id and d.installed for d in detections)
@@ -42,6 +44,8 @@ def _check_adopted_replan(
         replan = build_plan(ctx.env, installed_adapters, desired_all(source, adapter_ids))
         adopted_set = {(r.tool, r.kind.value, r.key) for r in adopted}
         for op in replan.executable:
+            if isinstance(op, Link):
+                continue
             for ref in getattr(op, "claims", ()):
                 if (ref.tool, ref.kind.value, ref.key) in adopted_set:
                     warn(
@@ -49,14 +53,16 @@ def _check_adopted_replan(
                         f"warning: adopted item '{ref.key}' for {ref.tool} "
                         "still requires changes during sync",
                     )
-    except Exception:
-        pass
+        return 0
+    except Exception as exc:
+        warn(ctx, f"error checking adopted items: {exc}")
+        return 1
 
 
 def run(args: argparse.Namespace, ctx: CommandContext) -> int:
     """Run the init command: detect tools, import configs, and create source files."""
     # 1. detect_all: if no tool is installed, exit 0
-    detections = detect_all(ctx.env)
+    detections = detect_all(ctx.env, probe=ctx.probe)
     if not any(d.installed for d in detections):
         say(ctx, "No supported tool was found. Nothing to import.")
         return 0
@@ -141,34 +147,59 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
         if not confirm(ctx, "Proceed with initialisation?"):
             return 1
 
-    # 9. build plan
+    # 9. build and apply plan with retry
     installed_tool_ids = [d.tool for d in detections if d.installed and d.tool]
-    src_ops = source_ops(ctx.env, proposal, installed_tool_ids)
 
-    def _execute_plan(retry: bool = True) -> str | None:
+    def _prepare_and_apply():
+        curr_readings = read_all(ctx.env, ADAPTERS, detections)
+        curr_proposal = propose(
+            curr_readings,
+            detections,
+            from_tool=from_tool,
+            ask=ask_fn,
+            env=ctx.env,
+            adapters=adapters_by_id,
+        )
+        curr_src_ops = source_ops(ctx.env, curr_proposal, installed_tool_ids)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_config_dir = Path(tmp_dir) / "config"
+            tmp_config_dir.mkdir(parents=True, exist_ok=True)
+            for op in curr_src_ops:
+                if isinstance(op, EditFile):
+                    rel = op.path.relative_to(ctx.env.config_dir)
+                    dest = tmp_config_dir / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(op.transform(None))
+            load_source(tmp_config_dir, installed_tool_ids)
+
         sn_ops, sn_messages = snapshot_ops(ctx.env, adapters_by_id, detections)
         for msg in sn_messages:
             warn(ctx, msg)
-        combined_ops = list(sn_ops) + list(src_ops)
+
+        combined_ops = list(sn_ops) + list(curr_src_ops)
         plan = Plan(tuple(combined_ops))
-        try:
-            return apply_plan(
-                ctx.env,
-                plan,
-                label="init",
-                adopt=tuple(proposal.adopt),
-                run_cli=ctx.run_cli,
-            )
-        except (EngineError, BackupError, ApplyError) as exc:
-            msg = str(exc)
-            if retry and ("changed since it was planned" in msg or "BackupError" in msg):
-                warn(ctx, "a file changed while planning; retrying snapshot once...")
-                return _execute_plan(retry=False)
-            raise
+        curr_op_id = apply_plan(
+            ctx.env,
+            plan,
+            label="init",
+            adopt=tuple(curr_proposal.adopt),
+            run_cli=ctx.run_cli,
+            pinned=True,
+            warn=lambda msg: warn(ctx, msg),
+        )
+        return curr_op_id, curr_proposal
 
     # 10. apply_plan with snapshot retry
     try:
-        op_id = _execute_plan(retry=True)
+        try:
+            op_id, final_proposal = _prepare_and_apply()
+        except (BackupError, ApplyError) as exc:
+            if isinstance(exc, BackupError) or "changed since it was planned" in str(exc):
+                warn(ctx, "a file changed while planning; retrying snapshot once...")
+                op_id, final_proposal = _prepare_and_apply()
+            else:
+                raise
     except EngineLockedError as exc:
         warn(ctx, f"engine is locked: {exc}")
         return 1
@@ -177,6 +208,9 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
             ctx,
             "an earlier run did not finish; `all-agents undo` recovers it (available after M05)",
         )
+        return 1
+    except SourceError as exc:
+        warn(ctx, f"proposed source is invalid: {exc}")
         return 1
     except (ApplyError, PlanError, EngineError, BackupError) as exc:
         warn(ctx, f"engine reverted changes: {exc}")
@@ -188,5 +222,4 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
         say(ctx, "the safety snapshot is kept for your last 20 operations")
 
     # 12. re-plan check for adopted items
-    _check_adopted_replan(ctx, detections, proposal.adopt)
-    return 0
+    return _check_adopted_replan(ctx, detections, final_proposal.adopt)

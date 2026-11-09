@@ -14,40 +14,76 @@ Phase 4 milestone M04 introduces the public `all-agents init` command. Its purpo
    - If an adoption operation is reverted later via `revert_operation`, `journal.revert_owned` removes only the items added in `owned_delta`, preserving items previously owned.
    - This keeps the closed `Op` hierarchy intact (`EditFile`, `Link`, `RunCli`), avoiding synthetic "Adopt" ops while providing write-ahead journaling and full undoability for adopted items.
 
-2. **Rules per configuration kind during import.**
+2. **Atomic file editing (`EditFile.mode` Option A).**
+   - The engine implements atomic file modification with write-ahead safety copies and exact permission preservation.
+   - File modes (Unix permissions) are read prior to modification and restored onto replacement files.
+
+3. **Safety snapshot and the `snapshot_files` hook.**
+   - Before modifying any tool configuration during initialization or sync, the engine performs a preflight safety snapshot.
+   - Tool adapters declare the exact paths they read and manage via the `snapshot_files(env, scope)` hook.
+   - Snapshot entries are recorded in the journal operation as no-op entries (`snapshot (no change)`) capturing the byte-for-byte before-state. If an operation is reverted, files are restored to their exact pre-init state.
+   - Missing files are skipped silently. Warnings are only emitted for broken symlinks or non-regular paths (directories).
+   - If a snapshot backup fails due to concurrent modification or permission error, `init` retries once by re-reading tool configurations and re-building the import proposal before raising `BackupError`.
+
+4. **Rules per configuration kind during import.**
    - **Instructions (`Kind.INSTRUCTIONS`):**
-     If instructions are imported (e.g. from an existing tool), they form the initial shared `instructions.md` (`.core`). If tool instructions match the imported core, they can be adopted into the ledger rather than rewritten.
+     - Normalization: Candidate instructions are normalized via `_normalize_instructions_text`, stripping BOM and CRLF and enforcing strictly one trailing newline (`\n`).
+     - Validation: Files containing Unicode replacement characters (`U+FFFD`) or `NUL` bytes are rejected with a warning and omitted from proposal and adoption.
+     - Disambiguation:
+       - If instructions across all installed tools normalize identically, the shared text is written to `instructions.md`, and all tools are adopted.
+       - If instructions differ across tools, `--from <tool>` selects the chosen tool's text. In interactive mode without `--from`, the user is prompted to choose by number, displaying short SHA prefixes (e.g. `[1] Claude Code (sha: a1b2c3d4)`) rather than full texts.
+       - Matching files are adopted into the ledger. Divergent files are replaced only with explicit confirmation (or in `--yes` mode); otherwise, they remain untouched and unowned.
    - **MCP Servers (`Kind.MCP`):**
-     Servers imported across tools are unified into `mcp.jsonc`. Matching servers are scoped to all tools or specific tools via `tools = [...]`. Servers already present and identical in tool configs are marked for adoption into the ledger.
+     - Unification: Servers from all detected tools are merged into `mcp.jsonc`.
+     - Majority rule: If a server definition appears identically across multiple tools, the majority version is selected.
+     - Tie resolution: If equal counts exist for differing definitions, ties are resolved deterministically by registered adapter order (`opencode`, `claude`, `codex`, `agy`).
+     - Secret prevention and adoption exclusion (FIX-T1, FIX-T4):
+       - Candidate servers are checked via `server_secret_problems`. Servers containing literal environment secrets or literal header values have those fields dropped, and `import_notes` are generated.
+       - The advisory warning explicitly names the problematic field (e.g. `header 'Authorization' had a literal value...; reference an environment variable as ${NAME}`).
+       - Any server with an `ImportNote` is excluded from adoption for that tool. It is left unowned in the ledger so that the next `all-agents sync` plan flags a `Conflict` instead of silently stripping the user's active credentials.
    - **Skills (`Kind.SKILLS`):**
-     Existing user skills are imported into the source `skills/` directory. Identical links or shared directories are adopted into the ledger.
+     - Limits: Skill directories are guarded against resource exhaustion, enforcing limits of at most 5,000 files and 64 MiB total size per skill. Exceeding skills are skipped with a warning.
+     - Copy vs. relink: Tools storing standalone skill directories (e.g. `~/.agents/skills/<name>`) have their folders copied to `skills/<name>/`. Tools using symlinks or directory junctions to shared skills have identical links adopted directly.
 
-3. **Safety snapshot and dry-run design.**
-   - Safety snapshot: The engine never edits files in place without a write-ahead backup (`backup.capture`) fsynced to disk in the operation directory before any target file is modified.
-   - Snapshot retention: the snapshot is kept as long as its operation is kept (last 20 operations); pinned retention is a decision in M05.
-   - Initialisation respects `--dry-run`: when `--dry-run` is passed, `init` detects tools, reads configurations, generates the import proposal, prints the proposal summary, and exits with code 0 without modifying the file system or creating journal entries.
-   - Non-interactive safety: In non-interactive environments without `--yes`, `init` refuses to proceed and exits with code 1.
+5. **Dry-run and conflict preflight.**
+   - When `--dry-run` is passed, `init` detects tools, reads configurations, generates the import proposal, prints the proposal summary, and exits with code 0 without touching disk or creating journal operations.
+   - Dry-run conflict checking takes candidate adopted items into account, avoiding false "unmanaged / left alone" warnings for files that will be adopted upon apply.
 
-4. **Refusals and validations.**
-   - Already initialised: If `ctx.env.config_dir / "config.toml"` already exists, `init` refuses to run with a warning and exits with code 1, directing the user to `all-agents sync`.
-   - Unknown `--from`: If `--from <TOOL>` specifies an unknown tool identifier not registered in `ADAPTERS`, `init` warns and exits with code 1.
-   - Unreadable configs: If a tool configuration is corrupted or unreadable (`ConfigUnreadable`), `reader.read_all` records a masked problem. `init` prints the problem warning and refuses to overwrite the corrupted file (ADR 0016).
-   - Unfinished operations: If an earlier engine operation was left open (e.g. after a crash), `init` refuses with `OpenOperationError` and exits with code 1.
+6. **Refusals and validations.**
+   - Second-init refusal: If `ctx.env.config_dir / "config.toml"` already exists, `init` refuses with "already initialised; use `all-agents sync`" and exits with code 1.
+   - Unknown `--from`: Passing an unrecognized tool ID exits with code 1 and lists valid installed tools.
+   - Unreadable configs: Corrupted or invalid JSON/TOML files raise `ConfigUnreadable`; `init` reports masked warnings and refuses to touch the unreadable files (ADR 0016).
+   - Non-interactive safety: In non-interactive environments without `--yes`, `init` refuses to modify files and exits with code 1.
+   - Unfinished operations: If an earlier engine operation was left uncommitted or locked, `init` refuses with code 1.
 
-5. **Exit codes.**
-   - `0`: Success, dry-run completion, or no supported tool installed ("No supported tool was found. Nothing to import.").
+7. **Exit codes.**
+   - `0`: Success, dry-run completion, or no supported tools found.
    - `1`: Refusal or error (already initialised, unknown tool, declined confirmation, engine locked, unfinished operation, or plan/apply failure).
 
 ## Reason
 
-- Option A (Adoption carrier via `apply_plan`) fits naturally into the existing engine lifecycle (ADR 0005, 0008, 0010) without introducing synthetic ops or out-of-band ledger mutations.
-- By utilizing the engine's atomic writes and write-ahead journal for creating source configs and recording adopted items, the entire initialisation process is verifiable and undoable.
+- Option A for adoption avoids synthetic external ops, keeping the plan model closed while ensuring full transactionality and reversibility.
+- Strict secret hygiene and unowned retention ensure that credentials are never imported in plaintext, while preventing subsequent syncs from silently destroying user tokens.
+- Explicit disambiguation rules (SHA prefixes, majority vote, tie-breaking order) guarantee predictable, repeatable initialization across diverse environments.
 
 ## Options considered
 
-- **Option B (Synthetic `Adopt` op in `Plan`):** Rejected because `Op` represents external side effects (`EditFile`, `Link`, `RunCli`). Introducing an internal ledger-only op breaks the clean separation between external plan ops and internal engine state.
-- **Option C (Out-of-band `journal.set_owned` call):** Rejected because mutating the ledger directly without a journal operation cannot be tracked, audited, or undone via `all-agents undo`.
+- **Adoption Carrier:**
+  - **Option A (Carrier on `apply_plan`, Chosen):** Passed directly to engine, updating ledger and recording deltas within the journal transaction.
+  - **Option B (Synthetic `Adopt` op in `Plan`):** Rejected because `Op` models external filesystem effects (`EditFile`, `Link`, `RunCli`). Ledger mutations are internal state.
+  - **Option C (Out-of-band `journal.set_owned` call):** Rejected because unjournaled mutations cannot be audited or undone via `all-agents undo`.
+
+- **Snapshot Mechanism:**
+  - **Option A (`snapshot_files` adapter hook, Chosen):** Adapters declare the exact files they touch, enabling targeted, hermetic, and verifiable pre-modification backups.
+  - **Option B (Blind recursive snapshot of home directory):** Rejected due to catastrophic performance, memory bloat, and potential capture of unrelated user data.
+  - **Option C (Tool-specific external backup commands):** Rejected because external tool CLIs lack standardized backup formats and atomic rollback capabilities.
+
+- **MCP Conflict Resolution:**
+  - **Option A (Majority voting with deterministic tie-breaking, Chosen):** Unifies duplicate configurations with zero user interaction when a consensus exists, falling back to a fixed adapter sequence.
+  - **Option B (Prompt for every conflicting server):** Rejected because initial import over multiple installed tools would lead to overwhelming prompt fatigue.
 
 ## Open points
 
-None.
+1. **Project-level initialisation (v0.2):** Defining `all-agents init --project` workflows where local repository configurations (`.agents/`) layer over global source configs without overwriting user defaults.
+2. **Interactive prompts in non-interactive CI environments:** Designing headless fallback modes for disambiguating diverging instructions when running in automated staging environments.
+3. **Automated secret migration:** Exploring secure OS credential store integration (e.g. Windows Credential Manager, macOS Keychain, secret-service) to automatically migrate literal secrets to environment variables rather than requiring manual user intervention.

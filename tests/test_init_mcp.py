@@ -8,9 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.engine_support import FakeRunner, make_env
-
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
+from engine_support import FakeRunner, make_env
 from one_setup_all_agents.adapters import all_adapters
 from one_setup_all_agents.adapters.base import ToolAdapter
 from one_setup_all_agents.cli import build_parser
@@ -26,6 +25,7 @@ from one_setup_all_agents.importer import (
 )
 from one_setup_all_agents.model import (
     Detection,
+    EditFile,
     Kind,
     McpServer,
     Paths,
@@ -327,6 +327,84 @@ class InitMcpTests(unittest.TestCase):
         # Ownership is cleared
         owned_after = journal.owned_items(self.env.state_dir)
         self.assertFalse(any(item[1] == "mcp" and item[2] == "demo" for item in owned_after))
+
+    def test_adoption_with_dropped_secret_opencode_literal_env_not_edited_on_sync(self):
+        opencode_adapter = [a for a in all_adapters() if a.id == "opencode"][0]
+        paths = opencode_adapter.paths(self.env, Scope.GLOBAL)
+        paths.mcp.parent.mkdir(parents=True, exist_ok=True)
+        paths.mcp.write_text(
+            '{"mcp": {"servers": {"secret_srv": {"type": "local", "command": ["run"], "environment": {"SECRET_TOKEN": "sk-12345678901234567890123456"}}}}}',
+            encoding="utf-8",
+        )
+        paths.instructions.parent.mkdir(parents=True, exist_ok=True)
+        paths.instructions.write_text("# Instructions\n", encoding="utf-8")
+
+        detections = [
+            Detection(
+                installed=True,
+                tool="opencode",
+                label="OpenCode",
+                binary=Path("/bin/opencode"),
+            )
+        ]
+        ctx = self._ctx()
+        with patch("one_setup_all_agents.commands.init.detect_all", return_value=detections):
+            parser = build_parser()
+            args = parser.parse_args(["init", "--yes"])
+            code = init.run(args, ctx)
+        self.assertEqual(code, 0)
+
+        # After init --yes, sync --dry-run must propose NO edit of that server
+        source = load_source(self.env.config_dir, ["opencode"])
+        desired = desired_all(source, ["opencode"])
+        plan = build_plan(self.env, [opencode_adapter], desired)
+        edit_ops = [
+            op for op in plan.executable if isinstance(op, EditFile) and op.path == paths.mcp
+        ]
+        self.assertEqual(edit_ops, [])
+
+    def test_antigravity_import_notes_notes_only_literal_header_values_not_env_references(self):
+        import json
+
+        agy = [a for a in all_adapters() if a.id == "agy"][0]
+        paths = agy.paths(self.env, Scope.GLOBAL)
+        paths.mcp.parent.mkdir(parents=True, exist_ok=True)
+        content = {
+            "mcpServers": {
+                "srv1": {
+                    "serverUrl": "https://example.com",
+                    "headers": {
+                        "X-Token": "${MY_TOKEN}",
+                        "Authorization": "Bearer literal-secret",
+                    },
+                }
+            }
+        }
+        paths.mcp.write_text(json.dumps(content), encoding="utf-8")
+        notes = agy.import_notes(self.env, Scope.GLOBAL)
+        note_headers = [n.name for n in notes if n.field == "header"]
+        self.assertIn("Authorization", note_headers)
+        self.assertNotIn("X-Token", note_headers)
+
+    def test_header_advice_names_header_and_advises_env_var_reference(self):
+        adapter = all_adapters()[0]
+        from one_setup_all_agents.importer import propose_mcp
+        from one_setup_all_agents.model import ImportNote
+
+        reading = ToolReading(adapter.id, adapter.label, None, {}, (), ())
+        with patch.object(
+            adapter,
+            "import_notes",
+            return_value=[
+                ImportNote(tool=adapter.id, server="srv1", field="header", name="Authorization")
+            ],
+        ):
+            proposal = propose_mcp([reading], {adapter.id: adapter}, self.env)
+            header_msgs = [m for m in proposal.messages if "Authorization" in m]
+            self.assertTrue(len(header_msgs) > 0)
+            for msg in header_msgs:
+                self.assertNotIn("variable named Authorization", msg)
+                self.assertIn("environment variable", msg)
 
 
 if __name__ == "__main__":

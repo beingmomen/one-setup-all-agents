@@ -185,11 +185,8 @@ def revert_operation(
     """Put back everything operation op_id changed, taking the engine lock.
 
         Works on an operation that is done (it becomes undone), open after a crash (it becomes
-
-    ailed, marked
-    ecovered), or
-    ailed with a revert that did not finish. Anything else
-        is refused. Raises RevertError on drift (nothing changed) or when it stops half way.
+    failed, marked recovered), or failed with a revert that did not finish. Anything else
+    is refused. Raises RevertError on drift (nothing changed) or when it stops half way.
     """
     runner = run_cli or default_runner(env)
     with engine_lock(env.state_dir, timeout=lock_timeout):
