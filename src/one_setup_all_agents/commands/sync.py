@@ -104,9 +104,14 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
             return 0
 
     # (12) Apply plan
-    # Pruning trigger: journal.prune(ctx.env.state_dir) will be added in M05-T3.3
     try:
-        op_id = apply_plan(ctx.env, plan, label="sync", run_cli=ctx.run_cli)
+        op_id = apply_plan(
+            ctx.env,
+            plan,
+            label="sync",
+            run_cli=ctx.run_cli,
+            warn=lambda m: warn(ctx, m),
+        )
     except EngineLockedError as exc:
         warn(ctx, str(exc))
         return 1

@@ -13,7 +13,7 @@ The rules this module implements:
 - on POSIX, fsync the directory after the replace
 
 Line endings and a UTF-8 BOM are part of the bytes: the caller builds `data` from the
-existing file's bytes (see `_core.apply.FileText`), so they are preserved there.
+existing file's bytes, so they are preserved there.
 Not handled (documented limits): hard links are broken by the replace; ownership,
 extended attributes and ACLs are not preserved.
 """

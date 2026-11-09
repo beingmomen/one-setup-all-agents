@@ -333,16 +333,26 @@ class CmdUndoTests(EngineCase):
         ctx_init, _, _ = self._ctx()
         main(["init", "--yes"], context=ctx_init)
 
-        # Simulate 24 more done operations in the journal
-        for i in range(1, 25):
-            t = datetime(2026, 11, 6, 10, i, 0, tzinfo=timezone.utc)
-            op = journal.begin(self.state, f"sync-run-{i}", now=t)
-            op.set_status(journal.DONE)
+        # Create 24 more done operations with real entries through apply_plan
+        from one_setup_all_agents.engine.apply import apply_plan
+        from one_setup_all_agents.model import EditFile, Plan
 
-        # Prune retention leaves 20 operations
+        with patch("one_setup_all_agents.engine.journal.prune", return_value=[]):
+            for i in range(1, 25):
+                t = datetime(2026, 11, 6, 10, i, 0, tzinfo=timezone.utc)
+                p = self.home / f"undo_retention_{i}.txt"
+                plan = Plan(
+                    [EditFile(p, lambda _old, idx=i: f"v{idx}\n".encode(), None, f"write {i}")]
+                )
+                with patch(
+                    "one_setup_all_agents.engine.journal.now_iso", return_value=journal.now_iso(t)
+                ):
+                    apply_plan(self.env, plan, label=f"sync-run-{i}", run_cli=self.runner)
+
+        # Prune retention leaves 20 unpinned operations + 1 pinned init = 21 operations
         pruned = journal.prune(self.state, keep=20)
-        self.assertEqual(len(pruned.pruned), 5)
-        self.assertEqual(len(journal.list_operations(self.state)), 20)
+        self.assertEqual(len(pruned.pruned), 4)
+        self.assertEqual(len(journal.list_operations(self.state)), 21)
 
         # Undo operations one by one down to the oldest kept
         undone_count = 0
@@ -473,6 +483,169 @@ class CmdUndoTests(EngineCase):
         code3 = main(["sync", "--dry-run"], context=ctx3)
         self.assertNotIn("an earlier run did not finish", err3.getvalue())
         self.assertNotEqual(code3, 1)
+
+    def test_interrupted_after_target_undone_before_undo_op_done_recovers_cleanly(self):
+        (self.env.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        test_file = self.home / "file_t1.txt"
+        self.write(test_file, b"orig\n")
+        plan = Plan(
+            ops=[
+                EditFile(
+                    path=test_file,
+                    transform=lambda _: b"applied\n",
+                    expect_sha256=hashlib.sha256(b"orig\n").hexdigest(),
+                    description="edit t1",
+                ),
+            ]
+        )
+        op_id = apply_plan(self.env, plan, label="run-t1", run_cli=self.runner)
+        self.assertIsNotNone(op_id)
+        self.assertEqual(test_file.read_bytes(), b"applied\n")
+
+        real_set_status = journal.Operation.set_status
+
+        def patched_set_status(op_self, status, **fields):
+            if op_self.data.get("kind") == "undo" and status == journal.DONE:
+                raise KeyboardInterrupt("simulated interrupt before undo op is DONE")
+            return real_set_status(op_self, status, **fields)
+
+        with patch.object(
+            journal.Operation, "set_status", side_effect=patched_set_status, autospec=True
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                undo_mod.undo(self.env, run_cli=self.runner)
+
+        target_op = journal.load(self.state, op_id)
+        self.assertEqual(target_op.status, journal.UNDONE)
+        self.assertFalse(target_op.data.get("pending_revert", False))
+
+        ctx_sync, out_sync, err_sync = self._ctx()
+        code_sync = main(["sync", "--dry-run"], context=ctx_sync)
+        self.assertNotIn("an earlier run did not finish", err_sync.getvalue())
+        self.assertNotEqual(code_sync, 1)
+
+        ctx2, out2, err2 = self._ctx()
+        code2 = main(["undo"], context=ctx2)
+        self.assertEqual(code2, 0, f"undo recovery failed: {err2.getvalue()}")
+
+        ctx3, out3, err3 = self._ctx()
+        code3 = main(["undo", "--force"], context=ctx3)
+        self.assertEqual(code3, 0)
+        self.assertIn("Nothing to undo.", out3.getvalue())
+
+        ctx4, out4, err4 = self._ctx()
+        code4 = main(["sync", "--dry-run"], context=ctx4)
+        self.assertNotIn("an earlier run did not finish", err4.getvalue())
+        self.assertNotEqual(code4, 1)
+
+    def test_force_recovery_captures_safety_copy_of_user_edits(self):
+        ctx_init, _, _ = self._ctx()
+        main(["init", "--yes"], context=ctx_init)
+
+        target_adapter = all_adapters()[0]
+        instr_path = target_adapter.paths(self.env, Scope.GLOBAL).instructions
+        self.assertIsNotNone(instr_path)
+        orig_instr = instr_path.read_bytes()
+
+        (self.env.config_dir / INSTRUCTIONS_NAME).write_bytes(b"# Sync instructions\n")
+        ctx_sync, _, _ = self._ctx()
+        code_sync = main(["sync", "--yes"], context=ctx_sync)
+        self.assertEqual(code_sync, 0)
+        sync_instr = instr_path.read_bytes()
+        self.assertNotEqual(orig_instr, sync_instr)
+
+        import one_setup_all_agents.engine.revert as revert_mod
+
+        def failing_revert(env, op, runner, force=False):
+            raise RuntimeError("simulated undo crash before revert")
+
+        with patch.object(revert_mod, "revert_locked", side_effect=failing_revert):
+            with self.assertRaises(RuntimeError):
+                undo_mod.undo(self.env, run_cli=self.runner)
+
+        user_edit = b"# User edited after undo failed\n"
+        self.write(instr_path, user_edit)
+
+        ctx_f, out_f, err_f = self._ctx()
+        code_f = main(["undo", "--force"], context=ctx_f)
+        self.assertEqual(code_f, 0, f"undo --force failed: {err_f.getvalue()}")
+        self.assertEqual(instr_path.read_bytes(), orig_instr)
+
+        undo_ops = [o for o in journal.list_operations(self.state) if o.get("kind") == "undo"]
+        self.assertTrue(len(undo_ops) >= 1)
+        undo_id = undo_ops[-1]["id"]
+        payload_dir = self.state / "ops" / undo_id / "files"
+        self.assertTrue(payload_dir.is_dir())
+        payload_files = list(payload_dir.iterdir())
+        captured_contents = [p.read_bytes() for p in payload_files]
+        self.assertIn(user_edit, captured_contents)
+
+        ctx_l, out_l, _ = self._ctx()
+        code_l = main(["undo", "--list"], context=ctx_l)
+        self.assertEqual(code_l, 0)
+        self.assertIn("init", out_l.getvalue())
+
+    def test_permanently_failing_inverse_run_cli(self):
+        (self.env.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        test_file = self.home / "cli_failing_test.txt"
+        self.write(test_file, b"initial-content\n")
+
+        plan = Plan(
+            ops=[
+                RunCli(
+                    argv=("tool-cmd", "apply"),
+                    inverse_argv=("tool-cmd", "unapply"),
+                    description="important cli action",
+                ),
+                EditFile(
+                    path=test_file,
+                    transform=lambda _: b"modified-content\n",
+                    expect_sha256=hashlib.sha256(b"initial-content\n").hexdigest(),
+                    description="file edit action",
+                ),
+            ]
+        )
+        always_failing_runner = FakeRunner(fail_always=True)
+        self.runner.fail_on.append(["tool-cmd", "unapply"])
+        op_id = apply_plan(self.env, plan, label="cli-op", run_cli=self.runner)
+        self.assertIsNotNone(op_id)
+        self.assertEqual(test_file.read_bytes(), b"modified-content\n")
+
+        ctx1, out1, err1 = self._ctx(runner=always_failing_runner)
+        code1 = main(["undo"], context=ctx1)
+        self.assertEqual(code1, 1)
+
+        ctx2, out2, err2 = self._ctx(runner=always_failing_runner)
+        code2 = main(["undo", "--force"], context=ctx2)
+        self.assertEqual(code2, 1)
+        self.assertIn("important cli action", err2.getvalue())
+        self.assertNotIn("tool-cmd", err2.getvalue())
+        self.assertNotIn("unapply", err2.getvalue())
+        self.assertIn("one change must be removed by hand", err2.getvalue())
+
+        self.assertEqual(test_file.read_bytes(), b"initial-content\n")
+
+        target_op = journal.load(self.state, op_id)
+        self.assertEqual(target_op.status, journal.UNDONE)
+        note = target_op.data.get("note", "")
+        self.assertIn("important cli action", note)
+
+    def test_recovered_undo_op_unexpected_error_surfaces(self):
+        ctx_init, _, _ = self._ctx()
+        main(["init", "--yes"], context=ctx_init)
+
+        op = journal.begin(self.state, "crashed-op")
+
+        real_load = journal.load
+
+        def failing_load(state_dir, op_id):
+            if op_id == op.id:
+                raise OSError("simulated disk corruption loading journal")
+            return real_load(state_dir, op_id)
+
+        with patch("one_setup_all_agents.engine.undo.journal.load", side_effect=failing_load):
+            with self.assertRaises(OSError):
+                undo_mod.undo(self.env, run_cli=self.runner)
 
 
 if __name__ == "__main__":

@@ -1,9 +1,8 @@
 """Put an operation's changes back from its journal (the engine under `undo`).
 
 Guarantee and drift rules are in docs/decisions/0005; the details of this implementation are in
-0010. This is the LOW-LEVEL revert used by the automatic revert of a failed run, by crash
-recovery and, later, by the `undo` command (Phase 5, not built here: no `--force`, no stack
-rule, no listing, no retention).
+0010 and 0018. This is the LOW-LEVEL revert used by the automatic revert of a failed run, by crash
+recovery and by the `undo` command.
 
 Behavior:
 
@@ -46,6 +45,7 @@ class RevertReport:
     reverted: list[int] = field(default_factory=list)
     skipped: list[int] = field(default_factory=list)  # nothing to put back
     uncertain: list[int] = field(default_factory=list)  # inverse tried, outcome not certain
+    skipped_cli: list[dict] = field(default_factory=list)
 
 
 def _entry_path(entry: dict) -> Path:
@@ -79,7 +79,9 @@ def drifted_paths(entries: list[dict]) -> list[Path]:
     return drifted
 
 
-def _run_inverse(entry: dict, runner: Runner, report: RevertReport, op_id: str) -> None:
+def _run_inverse(
+    entry: dict, runner: Runner, report: RevertReport, op_id: str, *, force: bool = False
+) -> None:
     result = entry.get("result") or {}
     status = entry["status"]
     code = result.get("exit_code")
@@ -92,17 +94,27 @@ def _run_inverse(entry: dict, runner: Runner, report: RevertReport, op_id: str) 
         exit_code = runner(list(entry["inverse_argv"]))
     except Exception as exc:
         if not uncertain:
-            raise RevertError(
-                f"entry {entry['seq']}: the inverse command {shown} could not run "
-                f"({type(exc).__name__})",
-                op_id=op_id,
-                partial=bool(report.reverted),
-            ) from exc
-        exit_code = None
+            if force:
+                exit_code = -1
+            else:
+                raise RevertError(
+                    f"entry {entry['seq']}: the inverse command {shown} could not run "
+                    f"({type(exc).__name__})",
+                    op_id=op_id,
+                    partial=bool(report.reverted),
+                ) from exc
+        else:
+            exit_code = None
     if exit_code == 0:
         report.reverted.append(entry["seq"])
         return
     if not uncertain:
+        if force:
+            desc = entry.get("description") or f"entry #{entry['seq']}"
+            entry["revert_skipped"] = True
+            entry["revert_note"] = f"skipped failing inverse command: {desc}"
+            report.skipped_cli.append(entry)
+            return
         raise RevertError(
             f"entry {entry['seq']}: the inverse command {shown} exited with code {exit_code}",
             op_id=op_id,
@@ -151,7 +163,7 @@ def revert_entries(
     for entry in sorted(pending, key=lambda e: e["seq"], reverse=True):
         try:
             if entry["type"] == "run_cli":
-                _run_inverse(entry, runner, report, op.id)
+                _run_inverse(entry, runner, report, op.id, force=force)
             else:
                 _revert_path_entry(env, op.id, entry, report)
         except RevertError:
@@ -170,6 +182,10 @@ def revert_entries(
         op.save()
     journal.revert_owned(env.state_dir, op.data.get("owned_delta"))
     op.data["pending_revert"] = False
+    if report.skipped_cli:
+        skipped_names = [e.get("description") or f"entry #{e['seq']}" for e in report.skipped_cli]
+        op.data["skipped_entries"] = skipped_names
+        op.data["note"] = f"skipped entries: {', '.join(skipped_names)}"
     op.save()
     return report
 
@@ -184,7 +200,7 @@ def revert_operation(
 ) -> RevertReport:
     """Put back everything operation op_id changed, taking the engine lock.
 
-        Works on an operation that is done (it becomes undone), open after a crash (it becomes
+    Works on an operation that is done (it becomes undone), open after a crash (it becomes
     failed, marked recovered), or failed with a revert that did not finish. Anything else
     is refused. Raises RevertError on drift (nothing changed) or when it stops half way.
     """
@@ -203,8 +219,24 @@ def revert_locked(
     if status not in (journal.OPEN, journal.DONE) and not unfinished:
         raise RevertError(f"operation {op.id} is {status}; there is nothing to revert", op_id=op.id)
     report = revert_entries(env, op, runner, force=force)
+    note = None
+    if report.skipped_cli:
+        skipped_names = [e.get("description") or f"entry #{e['seq']}" for e in report.skipped_cli]
+        note = f"skipped entries: {', '.join(skipped_names)}"
     if status == journal.DONE:
-        op.set_status(journal.UNDONE, reverted_at=journal.now_iso())
+        extra = {"reverted_at": journal.now_iso()}
+        if note:
+            extra["note"] = note
+            extra["skipped_entries"] = [
+                e.get("description") or f"entry #{e['seq']}" for e in report.skipped_cli
+            ]
+        op.set_status(journal.UNDONE, **extra)
     else:
-        op.set_status(journal.FAILED, recovered=True, pending_revert=False)
+        extra = {"recovered": True, "pending_revert": False}
+        if note:
+            extra["note"] = note
+            extra["skipped_entries"] = [
+                e.get("description") or f"entry #{e['seq']}" for e in report.skipped_cli
+            ]
+        op.set_status(journal.FAILED, **extra)
     return report

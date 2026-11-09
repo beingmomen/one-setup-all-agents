@@ -51,7 +51,7 @@ The `all-agents sync` command reconciles the shared source configuration with ev
   - `--json`: Output machine-readable JSON status schema.
   - `--versions`: Probe installed tool executables to determine exact version strings.
 - **`undo`:**
-  - `--yes`: Revert without interactive prompt.
+  - `--list`: List operations that can be undone.
   - `--force`: Force revert even if unmanaged file drift is detected.
 
 ### 3. Exit codes
@@ -62,8 +62,8 @@ The `all-agents sync` command reconciles the shared source configuration with ev
   - `3`: Unresolved conflicts remain in the plan (both during dry-run and after apply).
 - **`all-agents status`:**
   - `0`: In sync (no pending operations or differences).
-  - `1`: Error (uninitialised, corrupted source config, or unreadable files).
-  - `2`: Differences or conflicts exist.
+  - `1`: Error (uninitialised, corrupted source config / syntax error, or unreadable ledger / state error).
+  - `2`: Differences, conflicts, or unreadable tool configuration files exist.
 - **`all-agents undo`:**
   - `0`: Successful revert or nothing to undo.
   - `1`: Refusal, error, or unforced drift detected.
@@ -139,21 +139,30 @@ The `all-agents sync` command reconciles the shared source configuration with ev
 
 - **Undo as `kind: "undo"`:** An undo operation executes an inverse plan that reverts a target operation. It opens a journal operation with `kind: "undo"` and `undoes: <target_op_id>`.
 - **Safety copies and no redo:** Before modifying or unlinking files during an undo, write-ahead safety copies are created in the undo operation directory. Reverting an operation is irreversible in the forward direction: there is no `redo` command.
-- **Additive journal fields:** Operations in `state/ops/<op_id>/metadata.json` and the ledger in `state/ledger.json` introduce two additive optional fields:
+- **Additive journal fields:** Operations in `state/ops/<op_id>/journal.json` and the ledger in `state/ledger.json` introduce three additive optional fields:
   - `kind`: `"apply"` or `"undo"` (defaults to `"apply"` for legacy entries).
   - `undoes`: string ID of the operation being reverted (only present when `kind == "undo"`).
+  - `pinned`: boolean indicating whether the operation is immune to retention pruning (defaults to `false`; `true` for `init` safety snapshots).
   Old journals without these fields load transparently without migrations; format version remains 1.
 - **Amendment to ADR 0005:** ADR 0005 stated that "every operation can be undone". This is clarified: only apply operations (`kind: "apply"`) can be undone; undo operations (`kind: "undo"`) and operations with unforced external file drift cannot be undone.
 
-### 7. Stack ordering, recovery, and retention policy
+### 7. Stack ordering, recovery, force, and retention policy
 
 - **Monotonic sequence ordering:** Operations in the journal are strictly ordered by sequential ledger append order, ensuring newest-first resolution even when multiple operations occur within the same second.
-- **FIX-T2 recovery rule:** If an undo operation is interrupted (Ctrl+C, crash, or step failure), its open entry records `after` states equal to the target's `before` states. During subsequent recovery, `recover_locked` recognizes these partially restored files as expected progress rather than external drift, allowing `undo` to resume cleanly without wedging the journal.
+- **Interrupted undo recovery rules:**
+  - If an undo operation is interrupted (Ctrl+C, crash, or step failure), its open entry records `after` states equal to the target's `before` states.
+  - During subsequent recovery, `recover_locked` checks the state of the target operation:
+    - If the target operation is already undone or all its entries have been reverted: mark the target operation `undone`, mark the undo operation `done`, and clear `pending_revert` on both operations.
+    - Otherwise: resume reverting the target operation (`revert_locked`), then mark the undo operation `done` and clear `pending_revert`.
+- **`--force` semantics:**
+  - When `--force` is supplied, `recover_locked` re-captures fresh safety copies of current file states for any un-reverted entries into the undo operation before reverting.
+  - Permanently failing inverse CLI commands are skipped under `--force`: the entry is marked `revert_skipped: true`, recorded in `skipped_entries` with an explanatory note, and the target operation is marked `undone` (or `failed` if an unrecoverable failure occurs).
 - **Retention pruning:**
   - Automatic trigger: Pruning runs automatically after successful `apply` and `undo` operations.
-  - Count threshold: Only `done` apply operations count toward the retention limit of `keep=20`.
-  - Cascading cleanup: Non-apply operations (`undone`, `undo`, and `failed`) are pruned only when older than the oldest kept `done` apply operation.
-  - Initial snapshot pinning: The initial `init` snapshot operation is permanently pinned (`pinned: true`) and is never pruned, guaranteeing a perpetual rollback path to pre-installation baseline.
+  - Count threshold: Keep at most 20 unpinned `done` apply operations (`keep=20`).
+  - Initial snapshot pinning: The initial `init` snapshot operation is permanently pinned (`pinned: true`), is never pruned, and does not count toward the retention limit of 20.
+  - Terminal operations cap: Non-`done` terminal operations (`undone`, `undo`, and `failed`) are capped at the 20 newest (older ones dropped).
+  - Active revert protection: Any operation still referenced by a pending revert or open undo is never pruned.
   - Error visibility: Pruning errors or warnings (e.g. unmanaged files in backup folders) are surfaced to stderr, never swallowed silently.
 
 ## Reason

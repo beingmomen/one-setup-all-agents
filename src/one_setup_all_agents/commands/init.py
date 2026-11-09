@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import argparse
-import tempfile
 from collections.abc import Sequence
-from pathlib import Path
 
 from ..adapters import ADAPTERS, all_adapters
-from ..config_source import SOURCE_CONFIG_NAME, SourceError, desired_all, load_source
+from ..config_source import (
+    INSTRUCTIONS_NAME,
+    MCP_NAME,
+    SOURCE_CONFIG_NAME,
+    SourceError,
+    desired_all,
+    load_source,
+    load_source_texts,
+)
 from ..context import CommandContext
 from ..detect import detect_all, render_detections
 from ..engine.apply import apply_plan
@@ -21,11 +27,46 @@ from ..engine.errors import (
     PlanError,
 )
 from ..engine.plan import build_plan
-from ..importer import propose, source_ops
+from ..importer import ImportProposal, propose, source_ops
 from ..model import Detection, EditFile, ItemRef, Link, Plan
 from ..reader import read_all
 from ..snapshot import snapshot_ops
 from ..ui import confirm, say, warn
+
+
+def _proposals_differ(p1: ImportProposal, p2: ImportProposal) -> bool:
+    """Return True if two proposals differ in instructions, servers, skills, or adopt."""
+    # 1. instructions: compare core text, adopt, skipped
+    if (p1.instructions is None) != (p2.instructions is None):
+        return True
+    if p1.instructions is not None and p2.instructions is not None:
+        if p1.instructions.core != p2.instructions.core:
+            return True
+        if p1.instructions.adopt != p2.instructions.adopt:
+            return True
+        if p1.instructions.skipped != p2.instructions.skipped:
+            return True
+
+    # 2. servers: compare servers dict
+    if p1.servers != p2.servers:
+        return True
+
+    # 3. skills: compare copies and adopt
+    if hasattr(p1.skills, "copies") and hasattr(p2.skills, "copies"):
+        if p1.skills.copies != p2.skills.copies:
+            return True
+        if p1.skills.adopt != p2.skills.adopt:
+            return True
+        if p1.skills.conflicts != p2.skills.conflicts:
+            return True
+    elif p1.skills != p2.skills:
+        return True
+
+    # 4. adopt
+    if p1.adopt != p2.adopt:
+        return True
+
+    return False
 
 
 def _check_adopted_replan(
@@ -150,28 +191,49 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
     # 9. build and apply plan with retry
     installed_tool_ids = [d.tool for d in detections if d.installed and d.tool]
 
-    def _prepare_and_apply():
-        curr_readings = read_all(ctx.env, ADAPTERS, detections)
-        curr_proposal = propose(
-            curr_readings,
-            detections,
-            from_tool=from_tool,
-            ask=ask_fn,
-            env=ctx.env,
-            adapters=adapters_by_id,
-        )
-        curr_src_ops = source_ops(ctx.env, curr_proposal, installed_tool_ids)
+    resolved_from_tool = from_tool
+    if (
+        resolved_from_tool is None
+        and proposal.instructions is not None
+        and getattr(proposal.instructions, "from_tool", None) is not None
+    ):
+        resolved_from_tool = proposal.instructions.from_tool
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_config_dir = Path(tmp_dir) / "config"
-            tmp_config_dir.mkdir(parents=True, exist_ok=True)
-            for op in curr_src_ops:
-                if isinstance(op, EditFile):
-                    rel = op.path.relative_to(ctx.env.config_dir)
-                    dest = tmp_config_dir / rel
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(op.transform(None))
-            load_source(tmp_config_dir, installed_tool_ids)
+    def _validate_source_ops(ops: Sequence[object]) -> None:
+        config_text: str | None = None
+        mcp_text: str | None = None
+        instructions_text: str | None = None
+        appendices_map: dict[str, str] = {}
+        for op in ops:
+            if isinstance(op, EditFile):
+                if op.path == ctx.env.config_dir / SOURCE_CONFIG_NAME:
+                    config_text = op.transform(None).decode("utf-8")
+                elif op.path == ctx.env.config_dir / MCP_NAME:
+                    mcp_text = op.transform(None).decode("utf-8")
+                elif op.path == ctx.env.config_dir / INSTRUCTIONS_NAME:
+                    instructions_text = op.transform(None).decode("utf-8")
+                elif (
+                    op.path.parent == ctx.env.config_dir
+                    and op.path.name.startswith("instructions.")
+                    and op.path.name.endswith(".md")
+                ):
+                    tid = op.path.name[len("instructions.") : -len(".md")]
+                    appendices_map[tid] = op.transform(None).decode("utf-8")
+
+        if config_text is None:
+            raise SourceError(f"source config file '{SOURCE_CONFIG_NAME}' not found")
+
+        load_source_texts(
+            config_toml=config_text,
+            mcp_jsonc=mcp_text,
+            instructions=instructions_text,
+            appendices=appendices_map,
+            valid_tool_ids=installed_tool_ids,
+        )
+
+    def _prepare_and_apply(proposal_to_use: ImportProposal) -> tuple[str, ImportProposal]:
+        curr_src_ops = source_ops(ctx.env, proposal_to_use, installed_tool_ids)
+        _validate_source_ops(curr_src_ops)
 
         sn_ops, sn_messages = snapshot_ops(ctx.env, adapters_by_id, detections)
         for msg in sn_messages:
@@ -183,21 +245,39 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
             ctx.env,
             plan,
             label="init",
-            adopt=tuple(curr_proposal.adopt),
+            adopt=tuple(proposal_to_use.adopt),
             run_cli=ctx.run_cli,
             pinned=True,
             warn=lambda msg: warn(ctx, msg),
         )
-        return curr_op_id, curr_proposal
+        return curr_op_id, proposal_to_use
 
     # 10. apply_plan with snapshot retry
     try:
         try:
-            op_id, final_proposal = _prepare_and_apply()
+            op_id, final_proposal = _prepare_and_apply(proposal)
         except (BackupError, ApplyError) as exc:
             if isinstance(exc, BackupError) or "changed since it was planned" in str(exc):
                 warn(ctx, "a file changed while planning; retrying snapshot once...")
-                op_id, final_proposal = _prepare_and_apply()
+                curr_readings = read_all(ctx.env, ADAPTERS, detections)
+                try:
+                    retried_proposal = propose(
+                        curr_readings,
+                        detections,
+                        from_tool=resolved_from_tool,
+                        ask=None,
+                        env=ctx.env,
+                        adapters=adapters_by_id,
+                    )
+                except ValueError as val_exc:
+                    warn(ctx, f"files changed during init: {val_exc}")
+                    return 1
+
+                if _proposals_differ(proposal, retried_proposal):
+                    warn(ctx, "files changed during init")
+                    return 1
+
+                op_id, final_proposal = _prepare_and_apply(retried_proposal)
             else:
                 raise
     except EngineLockedError as exc:
@@ -206,7 +286,7 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
     except OpenOperationError:
         warn(
             ctx,
-            "an earlier run did not finish; `all-agents undo` recovers it (available after M05)",
+            "an earlier run did not finish; `all-agents undo` recovers it",
         )
         return 1
     except SourceError as exc:
@@ -219,7 +299,7 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
     # 11. report operation
     if op_id:
         say(ctx, f"initialised operation {op_id}")
-        say(ctx, "the safety snapshot is kept for your last 20 operations")
+        say(ctx, "the safety snapshot is kept permanently")
 
     # 12. re-plan check for adopted items
     return _check_adopted_replan(ctx, detections, final_proposal.adopt)

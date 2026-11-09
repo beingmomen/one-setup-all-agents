@@ -410,7 +410,7 @@ class CmdInitTests(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertIn("unexpected boom", ctx.err.getvalue())
 
-    def test_snapshot_retry_reruns_read_and_proposal_and_matches_backup_error(self):
+    def test_snapshot_retry_aborts_when_retried_proposal_differs(self):
         from one_setup_all_agents.cli import build_parser
         from one_setup_all_agents.commands import init
         from one_setup_all_agents.engine.errors import BackupError
@@ -442,11 +442,110 @@ class CmdInitTests(unittest.TestCase):
             args = parser.parse_args(["init", "--yes"])
             code = init.run(args, ctx)
 
+        self.assertEqual(code, 1)
+        self.assertIn("files changed during init", ctx.err.getvalue())
+        self.assertFalse((self.env.config_dir / "instructions.md").exists())
+
+    def test_snapshot_retry_succeeds_when_retried_proposal_matches(self):
+        from one_setup_all_agents.cli import build_parser
+        from one_setup_all_agents.commands import init
+        from one_setup_all_agents.engine.errors import BackupError
+
+        adapter = all_adapters()[0]
+        paths = adapter.paths(self.env, Scope.GLOBAL)
+        paths.instructions.parent.mkdir(parents=True, exist_ok=True)
+        paths.instructions.write_text("# Initial\n", encoding="utf-8")
+        detection = Detection(
+            installed=True, tool=adapter.id, label=adapter.label, binary=Path("/bin/adapter")
+        )
+
+        ctx = self._ctx()
+        call_count = [0]
+        orig_apply = init.apply_plan
+
+        def fake_apply(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise BackupError("transient backup error")
+            return orig_apply(*args, **kwargs)
+
+        with (
+            patch("one_setup_all_agents.commands.init.detect_all", return_value=[detection]),
+            patch("one_setup_all_agents.commands.init.apply_plan", side_effect=fake_apply),
+        ):
+            parser = build_parser()
+            args = parser.parse_args(["init", "--yes"])
+            code = init.run(args, ctx)
+
         self.assertEqual(code, 0)
         self.assertEqual(call_count[0], 2)
         inst_file = self.env.config_dir / "instructions.md"
         self.assertTrue(inst_file.is_file())
-        self.assertEqual(inst_file.read_text(encoding="utf-8"), "# Changed bytes\n")
+        self.assertEqual(inst_file.read_text(encoding="utf-8"), "# Initial\n")
+
+    def test_init_interactive_different_instructions_asks_each_question_once(self):
+        from one_setup_all_agents.cli import build_parser
+        from one_setup_all_agents.commands import init
+        from one_setup_all_agents.model import Instructions
+        from one_setup_all_agents.reader import ToolReading
+
+        adapter_a = all_adapters()[0]
+        adapter_b = all_adapters()[1]
+        detection_a = Detection(
+            installed=True, tool=adapter_a.id, label=adapter_a.label, binary=Path("/bin/a")
+        )
+        detection_b = Detection(
+            installed=True, tool=adapter_b.id, label=adapter_b.label, binary=Path("/bin/b")
+        )
+        reading_a = ToolReading(
+            adapter_a.id,
+            adapter_a.label,
+            Instructions(Path("a"), "# Instructions A\n"),
+            {},
+            (),
+            (),
+        )
+        reading_b = ToolReading(
+            adapter_b.id,
+            adapter_b.label,
+            Instructions(Path("b"), "# Instructions B\n"),
+            {},
+            (),
+            (),
+        )
+
+        prompts_asked: list[str] = []
+
+        answers = {"Choose": "1", "Proceed": "y"}
+
+        def counting_read_line(prompt: str) -> str:
+            prompts_asked.append(prompt)
+            for k, v in answers.items():
+                if k in prompt:
+                    return v
+            raise EOFError(f"unexpected prompt #{len(prompts_asked)}: {prompt}")
+
+        ctx = self._ctx(is_interactive=True, read_line=counting_read_line)
+
+        with (
+            patch(
+                "one_setup_all_agents.commands.init.detect_all",
+                return_value=[detection_a, detection_b],
+            ),
+            patch(
+                "one_setup_all_agents.commands.init.read_all",
+                return_value=[reading_a, reading_b],
+            ),
+        ):
+            parser = build_parser()
+            args = parser.parse_args(["init"])
+            code = init.run(args, ctx)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(prompts_asked), 2)
+        inst_file = self.env.config_dir / "instructions.md"
+        self.assertTrue(inst_file.is_file())
+        self.assertEqual(inst_file.read_text(encoding="utf-8"), "# Instructions A\n")
 
 
 if __name__ == "__main__":

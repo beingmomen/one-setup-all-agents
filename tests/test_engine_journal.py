@@ -117,6 +117,47 @@ class JournalTests(EngineCase):
         self.assertEqual(journal.owned_for(self.state, "example", "mcp"), frozenset())
         self.assertFalse(self.state.exists(), "reading must not create the state directory")
 
+    def test_op_with_init_label_and_pinned_false_is_not_pinned(self):
+        op = journal.begin(self.state, "initial sync of docs", pinned=False, now=CLOCK)
+        self.assertFalse(op.pinned)
+        ledger = journal.read_ledger(self.state)
+        op_entry = ledger["operations"][0]
+        self.assertFalse(bool(op_entry.get("pinned", False)))
+
+    def test_prune_ignores_bad_op_ids_in_ledger_without_resolving_outside_ops(self):
+        # Create decoy directory outside ops/
+        decoy_dir = self.state / "decoy"
+        decoy_dir.mkdir(parents=True, exist_ok=True)
+        decoy_file = decoy_dir / "secret.txt"
+        decoy_file.write_text("survives", encoding="utf-8")
+
+        # Plant valid operations
+        op1 = journal.begin(self.state, "op1")
+        op1.set_status(journal.DONE)
+        op2 = journal.begin(self.state, "op2")
+        op2.set_status(journal.DONE)
+
+        # Plant bad operation IDs in ledger
+        def inject_bad_ops(led: dict) -> None:
+            led["operations"].insert(0, {"id": "../decoy", "status": "done", "label": "bad1"})
+            led["operations"].insert(0, {"id": "..", "status": "undone", "label": "bad2"})
+            led["operations"].insert(0, {"id": "", "status": "done", "label": "bad3"})
+            led["operations"].insert(
+                0, {"id": "invalid-regex", "status": "failed", "label": "bad4"}
+            )
+
+        journal.update_ledger(self.state, inject_bad_ops)
+
+        # Prune with keep=1
+        res = journal.prune(self.state, keep=1)
+        self.assertTrue(decoy_dir.is_dir())
+        self.assertTrue(decoy_file.is_file())
+        self.assertEqual(decoy_file.read_text(encoding="utf-8"), "survives")
+        self.assertNotIn("../decoy", res.pruned)
+        self.assertNotIn("..", res.pruned)
+        self.assertNotIn("", res.pruned)
+        self.assertNotIn("invalid-regex", res.pruned)
+
 
 class OwnedTests(EngineCase):
     def test_set_and_read_owned_per_tool_and_kind(self):

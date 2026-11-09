@@ -100,4 +100,15 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
 
     say(ctx, f"undone operation {result.op_id} ({result.label})")
     say(ctx, f"{result.remaining} more can be undone")
+
+    if result.skipped_cli:
+        for entry in result.skipped_cli:
+            desc = entry.get("description") or "inverse command"
+            warn(ctx, f"inverse command failed: {desc}")
+        if len(result.skipped_cli) == 1:
+            warn(ctx, "one change must be removed by hand")
+        else:
+            warn(ctx, f"{len(result.skipped_cli)} changes must be removed by hand")
+        return 1
+
     return 0

@@ -82,10 +82,28 @@ When planning operations, every adapter must adhere to the following rules:
 
 Every adapter is tested against `tests/adapter_contract.py`. To plug into the contract test runner:
 
-- `REGISTERED_SEEDS`: In `tests/test_adapter_contract.py`, map your adapter id to a seed function `seed_home(env)` that creates initial fixture files.
-- `REGISTERED_EXTRAS`: Map your adapter id to any special environment or CLI fixtures required by the contract harness.
-- `unwritten_mcp`: If your tool cannot store certain server configurations, declare them in `unwritten_mcp` so the contract runner knows they are intentionally skipped.
-- `removable_mcp`: Specifies the name of an MCP server to delete during the removal test (defaults to `"server-b"`).
+- `REGISTERED_SEEDS`: In `tests/test_adapter_contract.py`, map your adapter id to a seed function `seed_home(env)` that creates initial fixture files (e.g. the user's own native config before `all-agents`).
+- `REGISTERED_EXTRAS`: Optional mapping in `tests/test_adapter_contract.py` from adapter id to a function returning extra members for its contract class (the hooks `make_env` and `make_cli` of `AdapterContract`, needed by an adapter that plans `RunCli` ops).
+- `unwritten_mcp`: Hook returning names of harness desired MCP servers that this adapter deliberately does not write (defaults to `frozenset()`).
+- `removable_mcp`: Hook specifying the name of an MCP server to delete during the removal test (defaults to `"demo-remote"`).
+
+## Registering the Adapter
+
+Once your adapter class is implemented, register it in `src/one_setup_all_agents/adapters/__init__.py`:
+
+1. Import your adapter class (e.g. `from .demo_tool import DemoToolAdapter`).
+2. Add the adapter class to the `ADAPTERS` tuple:
+
+```python
+from .demo_tool import DemoToolAdapter
+
+ADAPTERS: tuple[type[ToolAdapter], ...] = (
+    # ...,
+    DemoToolAdapter,
+)
+```
+
+Adding the adapter to `ADAPTERS` in `adapters/__init__.py` automatically exposes it to discovery, reading, planning, CLI help text generation, and the boundary tests.
 
 ### Platform Behavior Rule
 

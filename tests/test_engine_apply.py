@@ -583,15 +583,9 @@ class RevertTests(ApplyCase):
         self.assertEqual(a.read_bytes(), b"a-old")
 
     def test_apply_plan_prunes_journal_keeping_last_20_operations(self):
-        from datetime import datetime, timezone
-
         for i in range(25):
-            t = datetime(2026, 11, 6, 10, i, 0, tzinfo=timezone.utc)
-            op = journal.begin(self.state, f"dummy-{i}", now=t)
-            op.set_status(journal.DONE)
-
-        a = self.write(self.home / "apply_prune.txt", b"start")
-        self.apply(self.edit(a, b"finish"))
+            f = self.home / f"apply_prune_{i}.txt"
+            self.apply(self.edit(f, b"start"))
 
         # After apply, pruning kept at most 20 operations
         ops = journal.list_operations(self.state)

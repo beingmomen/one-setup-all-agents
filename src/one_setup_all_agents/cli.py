@@ -1,12 +1,11 @@
 """Command-line entry point: `all-agents init|sync|status|undo`.
 
-Phase 0: the argument parser and `--help` work; every command reports that it is
-not implemented yet and exits with status 2.
+The four public commands (`init`, `sync`, `status`, `undo`) are implemented.
 
 Exit codes:
     0: ok or nothing to do
     1: refused or failed, nothing left changed
-    2: usage error or not implemented (argparse's own / Phase 0 stub)
+    2: usage error (argparse)
 
 Planned behavior of each command (v0.1, global scope only):
 

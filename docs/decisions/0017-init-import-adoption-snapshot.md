@@ -19,11 +19,11 @@ Phase 4 milestone M04 introduces the public `all-agents init` command. Its purpo
    - File modes (Unix permissions) are read prior to modification and restored onto replacement files.
 
 3. **Safety snapshot and the `snapshot_files` hook.**
-   - Before modifying any tool configuration during initialization or sync, the engine performs a preflight safety snapshot.
+   - Before modifying any tool configuration during initialization, the engine performs a preflight safety snapshot (snapshots happen during `init` only, not `sync`).
    - Tool adapters declare the exact paths they read and manage via the `snapshot_files(env, scope)` hook.
    - Snapshot entries are recorded in the journal operation as no-op entries (`snapshot (no change)`) capturing the byte-for-byte before-state. If an operation is reverted, files are restored to their exact pre-init state.
    - Missing files are skipped silently. Warnings are only emitted for broken symlinks or non-regular paths (directories).
-   - If a snapshot backup fails due to concurrent modification or permission error, `init` retries once by re-reading tool configurations and re-building the import proposal before raising `BackupError`.
+   - If a snapshot backup fails due to concurrent modification or permission error (or a file changed while planning), `init` retries once by re-reading tool configurations and re-building the import proposal. In non-interactive mode or during snapshot retry, if the retried proposal differs from the confirmed proposal, `init` aborts with exit 1.
 
 4. **Rules per configuration kind during import.**
    - **Instructions (`Kind.INSTRUCTIONS`):**
@@ -38,7 +38,7 @@ Phase 4 milestone M04 introduces the public `all-agents init` command. Its purpo
      - Majority rule: If a server definition appears identically across multiple tools, the majority version is selected.
      - Tie resolution: If equal counts exist for differing definitions, ties are resolved deterministically by registered adapter order (`opencode`, `claude`, `codex`, `agy`).
      - Secret prevention and adoption exclusion (FIX-T1, FIX-T4):
-       - Candidate servers are checked via `server_secret_problems`. Servers containing literal environment secrets or literal header values have those fields dropped, and `import_notes` are generated.
+       - Candidate servers are checked via `server_secret_problems`. A server containing literal environment secrets or literal header values is skipped whole (not imported into proposed servers, rather than having individual fields dropped), and `import_notes` are generated.
        - The advisory warning explicitly names the problematic field (e.g. `header 'Authorization' had a literal value...; reference an environment variable as ${NAME}`).
        - Any server with an `ImportNote` is excluded from adoption for that tool. It is left unowned in the ledger so that the next `all-agents sync` plan flags a `Conflict` instead of silently stripping the user's active credentials.
    - **Skills (`Kind.SKILLS`):**
@@ -51,9 +51,11 @@ Phase 4 milestone M04 introduces the public `all-agents init` command. Its purpo
 
 6. **Refusals and validations.**
    - Second-init refusal: If `ctx.env.config_dir / "config.toml"` already exists, `init` refuses with "already initialised; use `all-agents sync`" and exits with code 1.
+   - In-memory validation: Proposed source files (`config.toml`, `mcp.jsonc`, `instructions.md`, appendices) are validated in memory using `load_source_texts` before applying any plan, with no temporary files written to disk.
    - Unknown `--from`: Passing an unrecognized tool ID exits with code 1 and lists valid installed tools.
    - Unreadable configs: Corrupted or invalid JSON/TOML files raise `ConfigUnreadable`; `init` reports masked warnings and refuses to touch the unreadable files (ADR 0016).
    - Non-interactive safety: In non-interactive environments without `--yes`, `init` refuses to modify files and exits with code 1.
+   - Retry divergence: If a retried proposal differs from the confirmed proposal in non-interactive execution, `init` aborts and exits with code 1.
    - Unfinished operations: If an earlier engine operation was left uncommitted or locked, `init` refuses with code 1.
 
 7. **Exit codes.**

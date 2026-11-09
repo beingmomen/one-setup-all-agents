@@ -2,7 +2,7 @@
 
 **One setup for all your AI coding agents.** A shared agent config for Claude Code, Codex, OpenCode and Antigravity: write your config once, every agent gets the same setup, and any change can be undone with one command.
 
-> **Status: pre-alpha, not usable yet.** The four commands below exist but report "not implemented yet" and change nothing. The repository holds the decisions, the project skeleton and a ported core (Phases 0 to 2) that is not wired to the public commands yet. Do not install it expecting it to work.
+> **Status: pre-alpha.** The four public commands (`init`, `sync`, `status`, `undo`) are implemented with full engine safety guarantees (atomic writes, journaled operations, backups, and undo). Real-world verification against live tool environments is in progress. Do not install it expecting a finished production release.
 
 ## Why
 
@@ -19,12 +19,12 @@ If you use more than one AI coding agent, you keep the same things in several pl
 
 The command is `all-agents`.
 
-| Command | What it will do |
+| Command | What it does |
 |---|---|
 | `all-agents init` | Detect your installed tools, import what you already have (instructions, MCP servers, skills) into the shared config, after taking a full safety snapshot. |
 | `all-agents sync` | Show what would change in each tool (dry run), then apply it after you confirm. |
 | `all-agents status` | Show, per tool and per kind of config, whether the tool matches the shared config. |
-| `all-agents undo` | Reverse the last change, or a chosen one. |
+| `all-agents undo` | Reverse the last change using the journal. |
 
 Planned install, once the first release is published:
 
@@ -42,7 +42,7 @@ pipx install one-setup-all-agents    # then run: all-agents --help
 | OpenCode | `opencode` | planned | not yet verified | unverified | unverified | First adapter to be ported (simplest). |
 | Antigravity (`agy`) | `agy` | planned | not yet verified | unverified | unverified | Does not follow Windows junctions, so each skill is listed in its `skills.json` manifest by the path of the source folder. Has no variable reference for secrets, so an http server with headers is not written. |
 
-Nothing is implemented yet, so no cell says "verified". When the adapters exist, verification follows this plan: Windows and Linux (through WSL) are checked with the real tools; macOS is checked only through CI runners for what runs without a login (tests against fixtures). Anything not checked stays marked "unverified" here.
+The adapters and engine are implemented, but real tool verification is in progress, so no cell says "verified" yet. When the adapters are verified against real tools, verification follows this plan: Windows and Linux (through WSL) are checked with the real tools; macOS is checked only through CI runners for what runs without a login (tests against fixtures). Anything not checked stays marked "unverified" here.
 
 CI runs the tests on Windows, Linux and macOS.
 

@@ -100,7 +100,14 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
     active_ids = {a.id for a in active_adapters}
 
     desired = desired_all(source_config, sorted(active_ids)) if active_ids else {}
-    plan = build_plan(ctx.env, active_adapters, desired) if active_adapters else Plan()
+    try:
+        plan = build_plan(ctx.env, active_adapters, desired) if active_adapters else Plan()
+    except journal.JournalError as exc:
+        if is_json:
+            say(ctx, json.dumps({"schema": 1, "error": str(exc)}, indent=2))
+        else:
+            warn(ctx, str(exc))
+        return 1
 
     tools_data: list[dict] = []
     supported_kinds = (Kind.INSTRUCTIONS, Kind.MCP, Kind.SKILLS)
@@ -233,8 +240,12 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
     if ctx.env.state_dir.is_dir():
         try:
             undoable_count = len(journal.list_undoable(ctx.env.state_dir))
-        except Exception:
-            undoable_count = 0
+        except journal.JournalError as exc:
+            if is_json:
+                say(ctx, json.dumps({"schema": 1, "error": str(exc)}, indent=2))
+            else:
+                warn(ctx, str(exc))
+            return 1
 
     if is_json:
         data = {

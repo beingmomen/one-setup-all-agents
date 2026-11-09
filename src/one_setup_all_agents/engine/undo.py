@@ -1,4 +1,4 @@
-"""The user-facing `undo` command: reverse operations from the journal (Phase 5)."""
+"""The user-facing `undo` command: reverse operations from the journal."""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ class UndoResult:
     remaining: int
     reverted_descriptions: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    skipped_cli: list[dict] = field(default_factory=list)
 
 
 def undo(
@@ -50,19 +51,19 @@ def undo(
         # Check if an unfinished undo operation was recovered
         recovered_undo_op = None
         for r_id in recovered:
-            try:
-                r_op = journal.load(env.state_dir, r_id)
-                if r_op.kind == "undo" and r_op.undoes:
-                    recovered_undo_op = r_op
-                    break
-            except Exception:
-                pass
+            r_op = journal.load(env.state_dir, r_id)
+            if r_op.kind == "undo" and r_op.undoes:
+                recovered_undo_op = r_op
+                break
 
         if recovered_undo_op is not None:
             target_op = journal.load(env.state_dir, recovered_undo_op.undoes)
             remaining = len(journal.list_undoable(env.state_dir))
             reverted_seqs = [e["seq"] for e in target_op.entries if e.get("reverted")]
             prune_warnings = journal.prune(env.state_dir)
+            skipped_cli = []
+            if target_op.data.get("skipped_entries"):
+                skipped_cli = [{"description": d} for d in target_op.data["skipped_entries"]]
             return UndoResult(
                 op_id=target_op.id,
                 label=target_op.label,
@@ -76,6 +77,7 @@ def undo(
                     if e.get("reverted") and e.get("description")
                 ],
                 warnings=list(prune_warnings),
+                skipped_cli=skipped_cli,
             )
 
         # (b) Get undoable operations
@@ -154,8 +156,9 @@ def undo(
 
         # (f) Execute revert
         try:
-            target_op.data["pending_revert"] = True
-            target_op.save()
+            if target_op.status != journal.UNDONE:
+                target_op.data["pending_revert"] = True
+                target_op.save()
             report = revert.revert_locked(env, target_op, runner, force=force)
             undo_op.set_status(journal.DONE)
             undo_op.data["pending_revert"] = False
@@ -168,8 +171,12 @@ def undo(
                 error=mask_text(f"{type(exc).__name__}: {exc}"),
                 pending_revert=True,
             )
-            target_op.data["pending_revert"] = True
-            target_op.save()
+            if target_op.status != journal.UNDONE:
+                target_op.data["pending_revert"] = True
+                target_op.save()
+            else:
+                target_op.data["pending_revert"] = False
+                target_op.save()
             raise
 
         prune_warnings = journal.prune(env.state_dir)
@@ -194,4 +201,5 @@ def undo(
             remaining=remaining,
             reverted_descriptions=reverted_descriptions,
             warnings=list(prune_warnings),
+            skipped_cli=report.skipped_cli,
         )

@@ -14,9 +14,7 @@ plan into effects, and records every effect so that `undo` can reverse it:
     fsops.py    the non-atomic file-system operations (folders, links, copied trees), in one place
     lock.py     one engine run at a time per state directory
     errors.py   the engine's exceptions
-    undo.py     the user-facing `undo` command (Phase 5: still a stub)
+    undo.py     the user-facing `undo` command (reverses operations using the journal)
 
-Phase 3 (docs/decisions/0010-engine-v1.md): everything above is implemented except `undo.py`.
-The legacy formats in `_core/` are not wired to this engine yet; they stay until the adapters are
-ported.
+The engine and public commands are fully implemented.
 """

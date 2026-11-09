@@ -65,6 +65,14 @@ class JsoncEditTests(unittest.TestCase):
         out = jsonc_edit.edit_object(doc, ["mcp", "servers"], removes=["a"])
         self.assertEqual(jsonc.loads(out)["mcp"]["servers"], {"b": {"v": "{"}})
 
+    def test_escaped_quotes_inside_strings_exercise_skip_string_branch(self):
+        doc = r'{"mcp": {"servers": {"a": {"text": "hello \"world\""}, "b": 1}}}'
+        out = jsonc_edit.edit_object(doc, ["mcp", "servers"], removes=["b"])
+        self.assertEqual(jsonc.loads(out)["mcp"]["servers"], {"a": {"text": 'hello "world"'}})
+        doc_key = r'{"mcp": {"servers": {"\"escaped\"": 1, "b": 2}}}'
+        out_key = jsonc_edit.edit_object(doc_key, ["mcp", "servers"], removes=["b"])
+        self.assertEqual(jsonc.loads(out_key)["mcp"]["servers"], {'"escaped"': 1})
+
     def test_nested_edit_keeps_inner_comments_and_other_keys(self):
         doc = (
             '{\n "mcp": {"servers": {\n  "a": {\n   "type": "local",\n   // explains the command\n'

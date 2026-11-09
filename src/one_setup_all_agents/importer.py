@@ -49,6 +49,7 @@ class InstructionsProposal:
     adopt: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
+    from_tool: str | None = None
 
 
 @dataclass
@@ -134,16 +135,19 @@ def propose_instructions(
 
     distinct_texts = {c[2] for c in candidates}
 
+    chosen_from: str | None = None
     if len(distinct_texts) == 1:
         core = candidates[0][2]
         adopt = [c[0] for c in candidates]
         skipped: list[str] = []
+        chosen_from = candidates[0][0]
     else:
         if from_tool is not None:
             matched = [c for c in candidates if c[0] == from_tool]
             if not matched:
                 raise ValueError(f"tool '{from_tool}' has no instructions to import")
             core = matched[0][2]
+            chosen_from = from_tool
             should_replace = False
             if ask is not None:
                 ans = ask("replace the other files with the shared text on the next sync? [y/N]: ")
@@ -185,17 +189,9 @@ def propose_instructions(
                 return None
 
             core = chosen[2]
-            replace_ans = ask(
-                "replace the other files with the shared text on the next sync? [y/N]: "
-            )
-            should_replace = str(replace_ans).strip().lower() in ("y", "yes")
-
-            if should_replace:
-                adopt = [c[0] for c in candidates]
-                skipped = []
-            else:
-                adopt = [c[0] for c in candidates if c[2] == core]
-                skipped = [c[0] for c in candidates if c[2] != core]
+            chosen_from = chosen[0]
+            adopt = [c[0] for c in candidates if c[2] == core]
+            skipped = [c[0] for c in candidates if c[2] != core]
 
     # Dry-run conflict check
     if env is not None and adapters is not None:
@@ -226,6 +222,7 @@ def propose_instructions(
         adopt=adopt,
         skipped=skipped,
         messages=messages,
+        from_tool=chosen_from,
     )
 
 

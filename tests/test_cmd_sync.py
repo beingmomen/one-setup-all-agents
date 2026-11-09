@@ -330,6 +330,39 @@ class CmdSyncTests(EngineCase):
         self.assertEqual(res.returncode, 0, f"stdout: {res.stdout}\nstderr: {res.stderr}")
         self.assertIn("Nothing to do: all tools are in sync.", res.stdout)
 
+    def test_sync_yes_bom_crlf_source_writes_no_bom_to_tool_instructions(self):
+        instr_file = self.env.config_dir / INSTRUCTIONS_NAME
+        instr_file.write_bytes(b"\xef\xbb\xbf# Shared instructions with BOM\r\nSecond line\r\n")
+        ctx, _, _ = self._ctx()
+        code = main(["sync", "--yes"], context=ctx)
+        self.assertEqual(code, 0)
+
+        for a in all_adapters():
+            paths = a.paths(self.env, Scope.GLOBAL)
+            if paths.instructions and paths.instructions.exists():
+                content = paths.instructions.read_bytes()
+                self.assertFalse(
+                    content.startswith(b"\xef\xbb\xbf"),
+                    f"Tool {a.id} instructions started with BOM",
+                )
+                self.assertNotIn(b"\r\n", content)
+                self.assertIn(b"# Shared instructions with BOM\nSecond line\n", content)
+
+    def test_sync_prints_prune_warnings_from_apply_plan(self):
+        instr_file = self.env.config_dir / INSTRUCTIONS_NAME
+        instr_file.write_text("# Changed instructions\n", encoding="utf-8")
+        ctx, _, err = self._ctx()
+        fake_prune_result = journal.PruneResult(
+            warnings=["failed to prune operation 20261108T120000Z-0001: simulated prune failure"]
+        )
+        with patch("one_setup_all_agents.engine.journal.prune", return_value=fake_prune_result):
+            code = main(["sync", "--yes"], context=ctx)
+        self.assertEqual(code, 0)
+        self.assertIn(
+            "failed to prune operation 20261108T120000Z-0001: simulated prune failure",
+            err.getvalue(),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

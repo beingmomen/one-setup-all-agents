@@ -458,8 +458,7 @@ class McpServerShapeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             McpServer("a", command="c", env=(("DEMO_MODE", "1"), ("DEMO_MODE", "2")))
 
-    def test_the_legacy_source_and_the_model_share_one_check(self):
-
+    def test_env_value_looks_secret_check(self):
         from one_setup_all_agents._core.mask import env_value_looks_secret
 
         self.assertFalse(env_value_looks_secret("DEMO_MODE", "test"))

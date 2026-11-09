@@ -9,9 +9,9 @@ Scope:
 - Scanned: every `.py` file under `src/one_setup_all_agents/` EXCEPT the modules of the adapters in
   `ADAPTERS` (discovered from the registry, so a new adapter is exempt and its name is banned
   everywhere else automatically) and `_core/`.
-- `_core/` is out of scope on purpose: it is the ported prototype, reachable only through the
-  internal `_legacy` command, and Phase 5 removes it. Its tool names are not part of the new
-  architecture.
+- `_core/` contains internal shared utilities (formatting, masking, runner).
+
+
 - `adapters/__init__.py` may carry the tool names only on its import lines and registry lines.
 
 The dynamic half, with a real drop-in adapter, is `test_drop_in_tool.py`.

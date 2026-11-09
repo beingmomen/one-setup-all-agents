@@ -313,6 +313,69 @@ def _fail_run(env: Env, op: journal.Operation, runner: Runner, exc: BaseExceptio
     ) from exc
 
 
+def _all_entries_reverted(env: Env, target_op: journal.Operation) -> bool:
+    if not target_op.entries:
+        return False
+    for entry in target_op.entries:
+        if entry.get("reverted"):
+            continue
+        entry_type = entry.get("type")
+        if entry_type in ("edit_file", "link"):
+            before = entry.get("before")
+            if before is None or entry.get("effect") == "none":
+                continue
+            path = Path(entry.get("real_path") or entry.get("path"))
+            try:
+                current = backup.describe(path)
+            except Exception:
+                return False
+            if not backup.states_match(current, before):
+                return False
+        else:
+            return False
+    return True
+
+
+def _recapture_safety_copies(env: Env, op: journal.Operation, target_op: journal.Operation) -> None:
+    pending = [e for e in target_op.entries if not e.get("reverted")]
+    for entry in pending:
+        entry_type = entry.get("type")
+        if entry_type in ("edit_file", "link"):
+            p = Path(entry.get("real_path") or entry.get("path"))
+            try:
+                current_state = backup.describe(p)
+            except Exception:
+                continue
+            if current_state.get("state") in ("file", "copy_tree"):
+                existing = None
+                for e in op.entries:
+                    if e.get("path") == str(p) or e.get("real_path") == str(p):
+                        existing = e
+                        break
+                if existing is not None:
+                    if not backup.states_match(current_state, existing.get("before")):
+                        slot = max((e.get("seq", 0) for e in op.entries), default=0) + 1
+                        before = backup.capture(
+                            env.state_dir, op.id, p, slot, current=current_state
+                        )
+                        existing["before"] = before
+                        op.save()
+                else:
+                    slot = max((e.get("seq", 0) for e in op.entries), default=0) + 1
+                    before = backup.capture(env.state_dir, op.id, p, slot, current=current_state)
+                    op.append(
+                        {
+                            "seq": slot,
+                            "type": entry_type,
+                            "path": str(p),
+                            "before": before,
+                            "after": entry.get("before"),
+                            "status": journal.ENTRY_DONE,
+                        }
+                    )
+                    op.save()
+
+
 def recover_locked(env: Env, runner: Runner, *, force: bool = False) -> list[str]:
     """Put right every unfinished operation for a caller that already holds the lock."""
     recovered = []
@@ -320,11 +383,23 @@ def recover_locked(env: Env, runner: Runner, *, force: bool = False) -> list[str
         op = journal.load(env.state_dir, op_id)
         if op.kind == "undo" and op.undoes:
             target_op = journal.load(env.state_dir, op.undoes)
-            revert_locked(env, target_op, runner, force=force)
-            op.set_status(journal.DONE)
-            op.data["pending_revert"] = False
-            op.save()
-            recovered.append(op_id)
+            if target_op.status == journal.UNDONE or _all_entries_reverted(env, target_op):
+                if target_op.status != journal.UNDONE:
+                    target_op.set_status(journal.UNDONE, reverted_at=journal.now_iso())
+                target_op.data["pending_revert"] = False
+                target_op.save()
+                op.set_status(journal.DONE)
+                op.data["pending_revert"] = False
+                op.save()
+                recovered.append(op_id)
+            else:
+                if force:
+                    _recapture_safety_copies(env, op, target_op)
+                revert_locked(env, target_op, runner, force=force)
+                op.set_status(journal.DONE)
+                op.data["pending_revert"] = False
+                op.save()
+                recovered.append(op_id)
         else:
             revert_locked(env, op, runner, force=force)
             recovered.append(op_id)

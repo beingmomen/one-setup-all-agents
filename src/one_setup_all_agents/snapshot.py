@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from .adapters.base import ToolAdapter
-from .engine.atomic import resolve_target
 from .model import Detection, EditFile, Env, Scope
 
 
@@ -36,20 +36,19 @@ def snapshot_ops(
                 continue
             seen_paths.add(path)
             try:
-                is_symlink = path.is_symlink()
-                if is_symlink:
-                    target = resolve_target(path)
-                    if not target.exists():
+                if not os.path.lexists(path):
+                    continue
+                if os.path.islink(path):
+                    target_str = os.path.realpath(path)
+                    target_path = Path(target_str)
+                    if not target_path.exists():
                         messages.append(f"snapshot skipped broken symlink: {path}")
                         continue
-                    if not target.is_file():
+                    if not target_path.is_file():
                         messages.append(f"snapshot skipped path that is not a regular file: {path}")
                         continue
-                    data = target.read_bytes()
+                    data = target_path.read_bytes()
                 else:
-                    if not path.exists():
-                        # A missing file is skipped silently without warning
-                        continue
                     if not path.is_file():
                         messages.append(f"snapshot skipped path that is not a regular file: {path}")
                         continue

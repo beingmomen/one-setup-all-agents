@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
+from adapter_contract import AdapterContract
 from one_setup_all_agents.adapters import ADAPTERS
 from one_setup_all_agents.adapters.base import ToolAdapter
 
@@ -43,6 +44,43 @@ class AddingAToolDocsTests(unittest.TestCase):
                 self.doc_text,
                 f"Expected reference '{ref}' is missing from docs/adding-a-tool.md",
             )
+
+    def test_guide_mentions_registry_registration(self) -> None:
+        self.assertIn(
+            "adapters/__init__.py",
+            self.doc_text,
+            "docs/adding-a-tool.md must mention adapters/__init__.py for registration",
+        )
+        self.assertIn(
+            "ADAPTERS",
+            self.doc_text,
+            "docs/adding-a-tool.md must mention the ADAPTERS registry tuple",
+        )
+
+    def test_guide_contract_hook_defaults_match_code(self) -> None:
+        dummy = AdapterContract()
+        expected_removable = dummy.removable_mcp()
+
+        match_removable = re.search(
+            r'removable_mcp.*?defaults to [`"]*([a-zA-Z0-9_-]+)[`"]*',
+            self.doc_text,
+            re.IGNORECASE,
+        )
+        self.assertIsNotNone(
+            match_removable,
+            "docs/adding-a-tool.md must document the default for removable_mcp",
+        )
+        self.assertEqual(
+            match_removable.group(1),
+            expected_removable,
+            f"removable_mcp default in docs ({match_removable.group(1)}) must equal code ({expected_removable})",
+        )
+
+        self.assertIn(
+            "unwritten_mcp",
+            self.doc_text,
+            "docs/adding-a-tool.md must document unwritten_mcp hook",
+        )
 
     def test_doc_contains_no_real_tool_names_outside_marked_excerpts(self) -> None:
         excerpt_pattern = re.compile(

@@ -7,8 +7,6 @@ reads or writes the real home directory, and nothing reads files from outside th
 import hashlib
 import os
 import shutil
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,8 +16,6 @@ import _bootstrap  # noqa: F401  (adds src/ to sys.path)
 HERE = Path(__file__).resolve().parent
 SRC = _bootstrap.SRC
 FIXTURE_HOME = HERE / "fixtures" / "home"
-FIXTURE_SOURCE = HERE / "fixtures" / "servers.jsonc"
-FAKE_CLAUDE = HERE / "fake_claude.py"
 
 # One scratch folder per test PROCESS, inside the system temp directory (never inside the repository).
 WORK = Path(tempfile.gettempdir()) / "one-setup-all-agents-tests" / f"p{os.getpid()}"
@@ -41,23 +37,6 @@ def cli_env(extra=None):
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env.update(extra or {})
     return env
-
-
-def legacy_command(*args):
-    """argv that runs the transitional core CLI (`all-agents _legacy ...`) with this interpreter."""
-    return [sys.executable, "-m", "one_setup_all_agents", "_legacy", *args]
-
-
-def run_cli(*args, home=FIXTURE_HOME, env_home=None):
-    env = cli_env()
-    if env_home:
-        env["USERPROFILE"] = str(env_home)
-        env["HOME"] = str(env_home)
-    cmd = legacy_command(*args)
-    if home is not None:
-        cmd += ["--home", str(home)]
-    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", env=env, timeout=120)
-    return p.returncode, p.stdout, p.stderr
 
 
 def digest(root):

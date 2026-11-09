@@ -20,6 +20,7 @@ from one_setup_all_agents.config_source import (
     desired_all,
     desired_for,
     load_source,
+    load_source_texts,
     render_instructions_core,
     render_mcp_source,
     render_source_config,
@@ -617,6 +618,146 @@ class ConfigSourceTests(unittest.TestCase):
                 re.search(pattern, text, re.IGNORECASE),
                 f"Banned name '{banned}' in config_source.py",
             )
+
+    def test_load_source_texts_valid_in_memory_returns_source_config(self):
+        toml_text = "version = 1\n[tools.example]\nenabled = true\n"
+        mcp_text = """{
+  "version": 1,
+  "servers": {
+    "demo": {
+      "command": "demo-bin"
+    }
+  }
+}
+"""
+        inst_text = "# Core instructions\n"
+        app_text = {"example": "# Appendix example\n"}
+        cfg = load_source_texts(
+            config_toml=toml_text,
+            mcp_jsonc=mcp_text,
+            instructions=inst_text,
+            appendices=app_text,
+            valid_tool_ids=("example",),
+        )
+        self.assertIn("example", cfg.tools)
+        self.assertTrue(cfg.tools["example"].enabled)
+        self.assertIn("demo", cfg.servers)
+        self.assertEqual(cfg.instructions_core, "# Core instructions\n")
+        self.assertEqual(cfg.appendices.get("example"), "# Appendix example\n")
+        self.assertEqual(cfg.warnings, ())
+
+    def test_load_source_texts_invalid_toml_raises_source_error(self):
+        with self.assertRaises(SourceError) as ctx:
+            load_source_texts("not valid toml [[")
+        self.assertIn("failed to parse", str(ctx.exception))
+
+    def test_load_source_texts_invalid_mcp_raises_source_error(self):
+        with self.assertRaises(SourceError) as ctx:
+            load_source_texts("version = 1\n", mcp_jsonc="{ not valid jsonc")
+        self.assertIn("failed to parse", str(ctx.exception))
+
+    def test_load_source_texts_unknown_tool_id_raises_source_error(self):
+        toml_text = "version = 1\n[tools.unknown]\nenabled = true\n"
+        with self.assertRaises(SourceError) as ctx:
+            load_source_texts(toml_text, valid_tool_ids=("known-only",))
+        self.assertIn("unknown tool id", str(ctx.exception))
+
+    def test_load_source_bom_and_crlf_instructions_decoded_without_feff(self):
+        (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
+        bom_crlf = b"\xef\xbb\xbf# Core instructions\r\nSecond line\r\n"
+        (self.config_dir / INSTRUCTIONS_NAME).write_bytes(bom_crlf)
+        (self.config_dir / "instructions.example.md").write_bytes(
+            b"\xef\xbb\xbf# Appendix content\r\nSecond line\r\n"
+        )
+        cfg = load_source(self.config_dir, self.adapter_ids)
+        self.assertNotIn("\ufeff", cfg.instructions_core)
+        self.assertEqual(cfg.instructions_core, "# Core instructions\nSecond line\n")
+        self.assertNotIn("\ufeff", cfg.appendices["example"])
+        self.assertEqual(cfg.appendices["example"], "# Appendix content\nSecond line\n")
+
+    def test_render_mcp_source_escapes_quotes_and_backslashes_in_server_name(self):
+        weird_name = r'test"name\server'
+        entries = {
+            weird_name: ServerEntry(server=McpServer(name=weird_name, command="echo")),
+        }
+        rendered = render_mcp_source(entries)
+        cfg = load_source_texts(config_toml="version = 1\n", mcp_jsonc=rendered)
+        self.assertIn(weird_name, cfg.servers)
+
+    def test_startup_timeout_sec_rejects_nan_and_infinities(self):
+        mcp_nan = """{
+  "version": 1,
+  "servers": {
+    "srv": {
+      "command": "echo",
+      "startup_timeout_sec": NaN
+    }
+  }
+}"""
+        with self.assertRaises(SourceError) as ctx:
+            load_source_texts(config_toml="version = 1\n", mcp_jsonc=mcp_nan)
+        self.assertIn(
+            "'startup_timeout_sec' in server 'srv' must be a positive number",
+            str(ctx.exception),
+        )
+
+        mcp_inf = """{
+  "version": 1,
+  "servers": {
+    "srv": {
+      "command": "echo",
+      "startup_timeout_sec": Infinity
+    }
+  }
+}"""
+        with self.assertRaises(SourceError) as ctx:
+            load_source_texts(config_toml="version = 1\n", mcp_jsonc=mcp_inf)
+        self.assertIn(
+            "'startup_timeout_sec' in server 'srv' must be a positive number",
+            str(ctx.exception),
+        )
+
+    def test_unknown_field_and_setting_masks_secret_looking_key(self):
+        secret_key = "ghp_" + "1" * 20
+        toml_text = f"version = 1\n[tools.example]\nenabled = true\n{secret_key} = true\n"
+        with self.assertRaises(SourceError) as ctx:
+            load_source_texts(toml_text, valid_tool_ids=("example",))
+        self.assertNotIn(secret_key, str(ctx.exception))
+        self.assertIn("***", str(ctx.exception))
+
+        mcp_text = f"""{{
+  "version": 1,
+  "servers": {{
+    "srv": {{
+      "command": "echo",
+      "{secret_key}": "val"
+    }}
+  }}
+}}"""
+        with self.assertRaises(SourceError) as ctx:
+            load_source_texts(config_toml="version = 1\n", mcp_jsonc=mcp_text)
+        self.assertNotIn(secret_key, str(ctx.exception))
+        self.assertIn("***", str(ctx.exception))
+
+    def test_server_env_and_env_vars_clash_raises_clean_source_error(self):
+        mcp_text = """{
+  "version": 1,
+  "servers": {
+    "srv": {
+      "command": "echo",
+      "env": {
+        "SHARED_VAR": "non_secret_value"
+      },
+      "env_vars": [
+        "SHARED_VAR"
+      ]
+    }
+  }
+}"""
+        with self.assertRaises(SourceError) as ctx:
+            load_source_texts(config_toml="version = 1\n", mcp_jsonc=mcp_text)
+        self.assertEqual(str(ctx.exception), "server 'srv' is invalid")
+        self.assertNotIn("non_secret_value", str(ctx.exception))
 
 
 if __name__ == "__main__":

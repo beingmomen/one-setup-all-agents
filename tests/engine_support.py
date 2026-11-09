@@ -48,17 +48,23 @@ def can_make_dir_link(root: Path) -> bool:
 class FakeRunner:
     """A `RunCli` runner that records calls and returns scripted exit codes. Starts nothing."""
 
-    def __init__(self, fail_on: Sequence[Sequence[str]] = (), raise_on: Sequence[str] = ()):
+    def __init__(
+        self,
+        fail_on: Sequence[Sequence[str]] = (),
+        raise_on: Sequence[str] = (),
+        fail_always: bool = False,
+    ):
         self.calls: list[list[str]] = []
         self.fail_on = [list(a) for a in fail_on]
         self.raise_on = list(raise_on)
+        self.fail_always = fail_always
 
     def __call__(self, argv: Sequence[str]) -> int:
         argv = list(argv)
         self.calls.append(argv)
         if any(word in argv for word in self.raise_on):
             raise OSError("fake runner could not start")
-        return 1 if argv in self.fail_on else 0
+        return 1 if (self.fail_always or argv in self.fail_on) else 0
 
 
 class EngineCase(unittest.TestCase):

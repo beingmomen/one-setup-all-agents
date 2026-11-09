@@ -7,6 +7,7 @@ Reads and writes the unified agent configuration from the source directory
 from __future__ import annotations
 
 import json
+import math
 import re
 import tomllib
 from collections.abc import Mapping, Sequence
@@ -123,15 +124,21 @@ def source_exists(config_dir: Path) -> bool:
     return (config_dir / SOURCE_CONFIG_NAME).is_file()
 
 
-def load_source(config_dir: Path, adapter_ids: Sequence[str]) -> SourceConfig:
-    """Load and validate the shared source directory against known adapter IDs."""
-    config_file = config_dir / SOURCE_CONFIG_NAME
-    if not config_file.is_file():
-        raise SourceError(f"source config file '{SOURCE_CONFIG_NAME}' not found in {config_dir}")
+def load_source_texts(
+    config_toml: str,
+    mcp_jsonc: str | None = None,
+    instructions: str | None = None,
+    appendices: Mapping[str, str] | None = None,
+    valid_tool_ids: Sequence[str] | None = None,
+    skills: Sequence[SkillRef] | None = None,
+    path: Path = Path("."),
+) -> SourceConfig:
+    """Load and validate in-memory source configuration texts.
 
+    Shared by load_source and commands/init.py without creating temporary files.
+    """
     try:
-        raw_toml = config_file.read_bytes().decode("utf-8-sig")
-        toml_data = tomllib.loads(raw_toml)
+        toml_data = tomllib.loads(config_toml)
     except Exception as exc:
         raise SourceError(f"failed to parse '{SOURCE_CONFIG_NAME}': {exc}") from exc
 
@@ -145,7 +152,7 @@ def load_source(config_dir: Path, adapter_ids: Sequence[str]) -> SourceConfig:
         if key not in ("version", "tools", "projects"):
             raise SourceError(f"unknown top-level key '{key}' in '{SOURCE_CONFIG_NAME}'")
 
-    valid_ids = set(adapter_ids)
+    valid_ids = set(valid_tool_ids) if valid_tool_ids is not None else None
     tools_map: dict[str, ToolSettings] = {}
 
     tools_table = toml_data.get("tools", {})
@@ -155,7 +162,7 @@ def load_source(config_dir: Path, adapter_ids: Sequence[str]) -> SourceConfig:
     for pos, (tool_id, settings) in enumerate(tools_table.items(), 1):
         if not isinstance(tool_id, str):
             raise SourceError(f"tool id at [tools] position #{pos} must be a string")
-        if tool_id not in valid_ids:
+        if valid_ids is not None and tool_id not in valid_ids:
             raise SourceError(
                 f"unknown tool id at [tools] position #{pos} in '{SOURCE_CONFIG_NAME}'"
             )
@@ -163,7 +170,7 @@ def load_source(config_dir: Path, adapter_ids: Sequence[str]) -> SourceConfig:
             raise SourceError(f"settings for tool at [tools] position #{pos} must be a table")
         for skey in settings:
             if skey not in ("enabled", "skills_exclude"):
-                raise SourceError(f"unknown setting '{skey}' in [tools.{tool_id}]")
+                raise SourceError(f"unknown setting '{mask_text(skey)}' in [tools.{tool_id}]")
         enabled = settings.get("enabled", True)
         if not isinstance(enabled, bool):
             raise SourceError(f"'enabled' in [tools.{tool_id}] must be a boolean")
@@ -176,11 +183,9 @@ def load_source(config_dir: Path, adapter_ids: Sequence[str]) -> SourceConfig:
         tools_map[tool_id] = ToolSettings(enabled=enabled, skills_exclude=tuple(skills_ex))
 
     servers_map: dict[str, ServerEntry] = {}
-    mcp_file = config_dir / MCP_NAME
-    if mcp_file.is_file():
+    if mcp_jsonc is not None:
         try:
-            raw_mcp = mcp_file.read_bytes().decode("utf-8-sig")
-            mcp_data = jsonc.loads(raw_mcp)
+            mcp_data = jsonc.loads(mcp_jsonc)
         except Exception as exc:
             raise SourceError(f"failed to parse '{MCP_NAME}': {exc}") from exc
 
@@ -236,7 +241,7 @@ def load_source(config_dir: Path, adapter_ids: Sequence[str]) -> SourceConfig:
             }
             for field in sdata:
                 if field not in allowed_fields:
-                    raise SourceError(f"unknown field '{field}' in server '{sname}'")
+                    raise SourceError(f"unknown field '{mask_text(field)}' in server '{sname}'")
 
             has_url = "url" in sdata
             has_cmd = "command" in sdata
@@ -336,7 +341,7 @@ def load_source(config_dir: Path, adapter_ids: Sequence[str]) -> SourceConfig:
                         raise SourceError(
                             f"tools entry at position #{i} in server '{sname}' must be a string"
                         )
-                    if tid not in valid_ids:
+                    if valid_ids is not None and tid not in valid_ids:
                         raise SourceError(
                             f"unknown tool id at position #{i} in server '{sname}' tools"
                         )
@@ -353,7 +358,12 @@ def load_source(config_dir: Path, adapter_ids: Sequence[str]) -> SourceConfig:
             startup_timeout = None
             if "startup_timeout_sec" in sdata:
                 v = sdata["startup_timeout_sec"]
-                if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+                if (
+                    isinstance(v, bool)
+                    or not isinstance(v, (int, float))
+                    or not math.isfinite(v)
+                    or v <= 0
+                ):
                     raise SourceError(
                         f"'startup_timeout_sec' in server '{sname}' must be a positive number"
                     )
@@ -419,18 +429,70 @@ def load_source(config_dir: Path, adapter_ids: Sequence[str]) -> SourceConfig:
     warnings: list[str] = []
 
     instructions_core: str | None = None
-    core_file = config_dir / INSTRUCTIONS_NAME
-    if core_file.is_file():
-        try:
-            raw = core_file.read_bytes()
-            core_text = raw.decode("utf-8").replace("\r\n", "\n")
-        except (UnicodeDecodeError, OSError) as exc:
-            raise SourceError(f"cannot read '{INSTRUCTIONS_NAME}'") from exc
+    if instructions is not None:
+        core_text = instructions.replace("\r\n", "\n")
         if _BIDI_RE.search(core_text):
             warnings.append(
                 f"Unicode bidirectional control character found in '{INSTRUCTIONS_NAME}'"
             )
         instructions_core = core_text
+
+    appendices_map: dict[str, str] = {}
+    if appendices:
+        for tool_id, raw_app in sorted(appendices.items()):
+            if valid_ids is not None and tool_id not in valid_ids:
+                warnings.append(
+                    f"appendix file 'instructions.{tool_id}.md' "
+                    f"references unknown tool id '{tool_id}'"
+                )
+                continue
+            app_text = raw_app.replace("\r\n", "\n")
+            if _BIDI_RE.search(app_text):
+                warnings.append(
+                    f"Unicode bidirectional control character found in 'instructions.{tool_id}.md'"
+                )
+            appendices_map[tool_id] = app_text
+
+    skills_tuple = tuple(skills) if skills is not None else ()
+
+    return SourceConfig(
+        path=path,
+        tools=tools_map,
+        instructions_core=instructions_core,
+        appendices=appendices_map,
+        servers=servers_map,
+        skills=skills_tuple,
+        warnings=tuple(warnings),
+    )
+
+
+def load_source(config_dir: Path, adapter_ids: Sequence[str]) -> SourceConfig:
+    """Load and validate the shared source directory against known adapter IDs."""
+    config_file = config_dir / SOURCE_CONFIG_NAME
+    if not config_file.is_file():
+        raise SourceError(f"source config file '{SOURCE_CONFIG_NAME}' not found in {config_dir}")
+
+    try:
+        raw_toml = config_file.read_bytes().decode("utf-8-sig")
+    except Exception as exc:
+        raise SourceError(f"failed to parse '{SOURCE_CONFIG_NAME}': {exc}") from exc
+
+    mcp_file = config_dir / MCP_NAME
+    raw_mcp = None
+    if mcp_file.is_file():
+        try:
+            raw_mcp = mcp_file.read_bytes().decode("utf-8-sig")
+        except Exception as exc:
+            raise SourceError(f"failed to parse '{MCP_NAME}': {exc}") from exc
+
+    instructions_core: str | None = None
+    core_file = config_dir / INSTRUCTIONS_NAME
+    if core_file.is_file():
+        try:
+            raw = core_file.read_bytes()
+            instructions_core = raw.decode("utf-8-sig")
+        except (UnicodeDecodeError, OSError) as exc:
+            raise SourceError(f"cannot read '{INSTRUCTIONS_NAME}'") from exc
 
     appendices: dict[str, str] = {}
     for item in sorted(config_dir.glob("instructions.*.md")):
@@ -438,19 +500,14 @@ def load_source(config_dir: Path, adapter_ids: Sequence[str]) -> SourceConfig:
         if name == INSTRUCTIONS_NAME:
             continue
         tool_id = name[len("instructions.") : -len(".md")]
-        if tool_id not in valid_ids:
-            warnings.append(f"appendix file '{name}' references unknown tool id '{tool_id}'")
-            continue
         try:
             raw = item.read_bytes()
-            app_text = raw.decode("utf-8").replace("\r\n", "\n")
+            appendices[tool_id] = raw.decode("utf-8-sig")
         except (UnicodeDecodeError, OSError) as exc:
             raise SourceError(f"cannot read '{name}'") from exc
-        if _BIDI_RE.search(app_text):
-            warnings.append(f"Unicode bidirectional control character found in '{name}'")
-        appendices[tool_id] = app_text
 
     skills: list[SkillRef] = []
+    skill_warnings: list[str] = []
     skills_dir = config_dir / SKILLS_DIRNAME
     if skills_dir.is_dir():
         try:
@@ -462,23 +519,34 @@ def load_source(config_dir: Path, adapter_ids: Sequence[str]) -> SourceConfig:
                 continue
             name = entry.name
             if name.startswith(".") or "/" in name or "\\" in name:
-                warnings.append(f"skill folder '{name}' skipped (invalid name)")
+                skill_warnings.append(f"skill folder '{name}' skipped (invalid name)")
                 continue
             skill_md = entry / "SKILL.md"
             if not skill_md.is_file():
-                warnings.append(f"skill folder '{name}' skipped (missing SKILL.md)")
+                skill_warnings.append(f"skill folder '{name}' skipped (missing SKILL.md)")
                 continue
             skills.append(SkillRef(name=name, path=entry))
 
-    return SourceConfig(
-        path=config_dir,
-        tools=tools_map,
-        instructions_core=instructions_core,
+    sc = load_source_texts(
+        config_toml=raw_toml,
+        mcp_jsonc=raw_mcp,
+        instructions=instructions_core,
         appendices=appendices,
-        servers=servers_map,
-        skills=tuple(skills),
-        warnings=tuple(warnings),
+        valid_tool_ids=adapter_ids,
+        skills=skills,
+        path=config_dir,
     )
+    if skill_warnings:
+        sc = SourceConfig(
+            path=sc.path,
+            tools=sc.tools,
+            instructions_core=sc.instructions_core,
+            appendices=sc.appendices,
+            servers=sc.servers,
+            skills=sc.skills,
+            warnings=tuple(list(sc.warnings) + skill_warnings),
+        )
+    return sc
 
 
 def _check_no_double_curly(server_name: str, val: object) -> None:
@@ -607,7 +675,7 @@ def render_mcp_source(
         srv_json = json.dumps(obj, indent=2)
         srv_lines = srv_json.splitlines()
         comma = "," if idx < len(snames) - 1 else ""
-        lines.append(f'    "{sname}": {srv_lines[0]}')
+        lines.append(f"    {json.dumps(sname)}: {srv_lines[0]}")
         for sline in srv_lines[1:-1]:
             lines.append(f"    {sline}")
         lines.append(f"    {srv_lines[-1]}{comma}")

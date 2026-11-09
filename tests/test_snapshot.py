@@ -6,6 +6,7 @@ import os
 import stat
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
 from engine_support import POSIX, EngineCase, FakeRunner
@@ -165,8 +166,74 @@ class SnapshotTests(EngineCase):
         detections = self._installed_detections([adapter])
         ops, messages = snapshot_ops(self.env, adapters_by_id, detections)
         self.assertEqual(ops, [])
-        self.assertEqual(len(messages), 1)
-        self.assertIn("broken", messages[0].lower())
+        self.assertEqual(messages, [f"snapshot skipped broken symlink: {snap_path}"])
+
+    def test_broken_symlink_mocked_emits_broken_symlink_warning(self):
+        adapter = all_adapters()[0]
+        adapters_by_id = {adapter.id: adapter}
+        paths = list(adapter.snapshot_files(self.env, Scope.GLOBAL))
+        self.assertTrue(paths)
+        snap_path = paths[0]
+        missing_target = self.home / "nonexistent_target_file.json"
+
+        def fake_islink(p):
+            return Path(p) == snap_path
+
+        def fake_realpath(p):
+            if Path(p) == snap_path:
+                return str(missing_target)
+            return str(p)
+
+        def fake_lexists(p):
+            if Path(p) == snap_path:
+                return True
+            return os.path.exists(p)
+
+        detections = self._installed_detections([adapter])
+        with (
+            patch("os.path.islink", side_effect=fake_islink),
+            patch("os.path.realpath", side_effect=fake_realpath),
+            patch("os.path.lexists", side_effect=fake_lexists),
+        ):
+            ops, messages = snapshot_ops(self.env, adapters_by_id, detections)
+
+        self.assertEqual(ops, [])
+        self.assertEqual(messages, [f"snapshot skipped broken symlink: {snap_path}"])
+
+    def test_symlink_to_directory_mocked_emits_not_a_regular_file_warning(self):
+        adapter = all_adapters()[0]
+        adapters_by_id = {adapter.id: adapter}
+        paths = list(adapter.snapshot_files(self.env, Scope.GLOBAL))
+        self.assertTrue(paths)
+        snap_path = paths[0]
+        target_dir = self.home / "target_directory"
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        def fake_islink(p):
+            return Path(p) == snap_path
+
+        def fake_realpath(p):
+            if Path(p) == snap_path:
+                return str(target_dir)
+            return str(p)
+
+        def fake_lexists(p):
+            if Path(p) == snap_path:
+                return True
+            return os.path.exists(p)
+
+        detections = self._installed_detections([adapter])
+        with (
+            patch("os.path.islink", side_effect=fake_islink),
+            patch("os.path.realpath", side_effect=fake_realpath),
+            patch("os.path.lexists", side_effect=fake_lexists),
+        ):
+            ops, messages = snapshot_ops(self.env, adapters_by_id, detections)
+
+        self.assertEqual(ops, [])
+        self.assertEqual(
+            messages, [f"snapshot skipped path that is not a regular file: {snap_path}"]
+        )
 
     def test_existing_directory_emits_warning(self):
         adapter = all_adapters()[0]

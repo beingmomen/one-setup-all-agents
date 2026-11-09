@@ -371,6 +371,30 @@ class CmdStatusTests(EngineCase):
         self.assertTrue(data["initialised"])
         self.assertEqual(data["undoable_operations"], 1)
 
+    def test_status_with_corrupt_ledger_exits_one_without_traceback(self):
+        self._init_and_sync()
+        # Corrupt ledger.json
+        (self.state / "ledger.json").write_bytes(b"{corrupted json")
+
+        ctx, out, err = self._ctx()
+        code = main(["status"], context=ctx)
+        self.assertEqual(code, 1)
+        self.assertIn("cannot read ledger.json", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+        self.assertNotIn("Traceback", out.getvalue())
+
+    def test_status_json_with_corrupt_ledger_exits_one(self):
+        self._init_and_sync()
+        # Corrupt ledger.json
+        (self.state / "ledger.json").write_bytes(b"{corrupted json")
+
+        ctx, out, err = self._ctx()
+        code = main(["status", "--json"], context=ctx)
+        self.assertEqual(code, 1)
+        data = json.loads(out.getvalue())
+        self.assertEqual(data["schema"], 1)
+        self.assertIn("cannot read ledger.json", data["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

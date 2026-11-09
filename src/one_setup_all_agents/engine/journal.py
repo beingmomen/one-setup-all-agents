@@ -293,7 +293,7 @@ def begin(
             break
     fsops.ensure_private_dir(op_dir(state_dir, op_id))
     created = now_iso(now)
-    is_pinned = pinned or label == "init" or label.startswith("init")
+    is_pinned = bool(pinned)
     data = {
         "format": JOURNAL_FORMAT,
         "version": JOURNAL_VERSION,
@@ -363,15 +363,18 @@ def find_unfinished(state_dir: Path) -> list[str]:
 _OP_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{4}$")
 
 
-def _is_terminal(state_dir: Path, op_entry: dict) -> bool:
+def _is_terminal(state_dir: Path, op_entry: dict, protected_ids: set[str] | None = None) -> bool:
     """True if operation has reached a terminal status and is not pending recovery."""
+    op_id = op_entry.get("id")
+    if not op_id or not isinstance(op_id, str) or not _OP_ID_RE.match(op_id):
+        return False
+    if protected_ids and op_id in protected_ids:
+        return False
     status = op_entry.get("status")
     if status not in (DONE, UNDONE, FAILED):
         return False
-    op_id = op_entry.get("id")
-    if not op_id:
+    if op_entry.get("pending_revert"):
         return False
-    # If failed, check whether it has pending_revert
     jpath = journal_path(state_dir, op_id)
     if jpath.is_file():
         try:
@@ -381,6 +384,22 @@ def _is_terminal(state_dir: Path, op_entry: dict) -> bool:
         except JournalError:
             return False
     return True
+
+
+def _is_pinned(state_dir: Path, op: dict) -> bool:
+    if bool(op.get("pinned", False)):
+        return True
+    op_id = op.get("id")
+    if op_id and isinstance(op_id, str) and _OP_ID_RE.match(op_id):
+        jpath = journal_path(state_dir, op_id)
+        if jpath.is_file():
+            try:
+                data = _read_json(jpath, JOURNAL_FORMAT, JOURNAL_VERSION)
+                if bool(data.get("pinned", False)):
+                    return True
+            except JournalError:
+                pass
+    return False
 
 
 class PruneResult(list):
@@ -395,11 +414,12 @@ def prune(state_dir: Path, keep: int = 20) -> list[str]:
     """Prune old operations from disk and index, keeping at most keep done apply operations.
 
     Raises ValueError if keep < 1.
-    - Only `done` apply operations count toward `keep`.
-    - `undone`, `undo` and `failed` operations are dropped only when older than the
-      oldest kept `done` operation.
-    - Pinned operations (including the `init` snapshot) and open/pending
-      operations are never pruned.
+    - Only unpinned `done` apply operations count toward `keep`.
+    - Pinned operations (such as the `init` snapshot) and open/pending operations are never pruned.
+    - Pinned operations do not count toward `keep`.
+    - Non-`done` terminal operations (`undone`, `undo`, `failed`) are capped at `keep` (newest kept,
+      older ones dropped).
+    - An operation still referenced by a pending revert is never pruned.
     - Returns a PruneResult (a list of warning strings, with a .pruned attribute of pruned IDs).
     """
     if keep < 1:
@@ -411,41 +431,51 @@ def prune(state_dir: Path, keep: int = 20) -> list[str]:
     if not operations:
         return PruneResult()
 
-    # Count all done apply operations (including pinned ones)
-    done_applies: list[tuple[int, dict]] = []
-    for i, op in enumerate(operations):
+    # Collect operations that are pending recovery or referenced by an unfinished undo
+    unfinished = find_unfinished(state_dir)
+    protected_ids = set(unfinished)
+    for uid in unfinished:
+        jpath = journal_path(state_dir, uid)
+        if jpath.is_file():
+            try:
+                udata = _read_json(jpath, JOURNAL_FORMAT, JOURNAL_VERSION)
+                if udata.get("undoes"):
+                    protected_ids.add(udata["undoes"])
+            except JournalError:
+                pass
+
+    for op in operations:
+        if op.get("status") == OPEN or op.get("pending_revert"):
+            if op.get("id"):
+                protected_ids.add(op["id"])
+            if op.get("undoes"):
+                protected_ids.add(op["undoes"])
+
+    # Separate eligible terminal operations into unpinned done applies and non-done terminals
+    unpinned_done_applies: list[dict] = []
+    non_done_terminals: list[dict] = []
+
+    for op in operations:
+        if _is_pinned(state_dir, op):
+            continue
+        if not _is_terminal(state_dir, op, protected_ids):
+            continue
         if op.get("status") == DONE and op.get("kind", "apply") != "undo":
-            done_applies.append((i, op))
+            unpinned_done_applies.append(op)
+        else:
+            non_done_terminals.append(op)
 
-    # If count of done applies <= keep, nothing is old enough to prune
-    if len(done_applies) <= keep:
-        return PruneResult()
-
-    excess = len(done_applies) - keep
-
-    # Oldest unpinned done applies up to excess
-    unpinned_done_applies = [
-        (i, op)
-        for i, op in done_applies
-        if not bool(op.get("pinned", False)) and op.get("label") != "init"
-    ]
-
-    to_prune_done = unpinned_done_applies[:excess]
-    if not to_prune_done:
-        return PruneResult()
-
-    cutoff_idx = to_prune_done[-1][0]
-
-    # Candidates for pruning: non-pinned, terminal operations with index <= cutoff_idx
     to_prune: list[dict] = []
-    for i, op in enumerate(operations):
-        if i > cutoff_idx:
-            continue
-        is_pinned = bool(op.get("pinned", False)) or op.get("label") == "init"
-        if is_pinned:
-            continue
-        if _is_terminal(state_dir, op):
-            to_prune.append(op)
+
+    # 1. Unpinned done applies: keep at most `keep` newest
+    if len(unpinned_done_applies) > keep:
+        excess_done = len(unpinned_done_applies) - keep
+        to_prune.extend(unpinned_done_applies[:excess_done])
+
+    # 2. Non-done terminal operations: keep at most `keep` newest
+    if len(non_done_terminals) > keep:
+        excess_non_done = len(non_done_terminals) - keep
+        to_prune.extend(non_done_terminals[:excess_non_done])
 
     if not to_prune:
         return PruneResult()
@@ -456,7 +486,7 @@ def prune(state_dir: Path, keep: int = 20) -> list[str]:
 
     for op in to_prune:
         op_id = op.get("id")
-        if not op_id or not _OP_ID_RE.match(op_id):
+        if not op_id or not isinstance(op_id, str) or not _OP_ID_RE.match(op_id):
             continue
         target = op_dir(state_dir, op_id)
         kind = fsops.link_kind(target)

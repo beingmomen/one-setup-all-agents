@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import _bootstrap  # noqa: F401
-from engine_support import EngineCase
+from engine_support import EngineCase, FakeRunner
 from one_setup_all_agents.adapters import all_adapters
 from one_setup_all_agents.cli import build_parser, main
 from one_setup_all_agents.config_source import (
@@ -129,11 +129,21 @@ class FixT6Tests(EngineCase):
         self.assertGreater(len(ops), 0)
         init_op_id = ops[0]["id"]
 
-        # Create 24 sync apply operations
-        for i in range(1, 25):
-            t = datetime(2026, 11, 8, 12, i, 0, tzinfo=UTC)
-            op = journal.begin(self.env.state_dir, f"sync-{i}", now=t)
-            op.set_status(journal.DONE)
+        from one_setup_all_agents.engine.apply import apply_plan
+        from one_setup_all_agents.model import EditFile, Plan
+
+        # Create 24 sync apply operations with real entries
+        with patch("one_setup_all_agents.engine.journal.prune", return_value=[]):
+            for i in range(1, 25):
+                t = datetime(2026, 11, 8, 12, i, 0, tzinfo=UTC)
+                p = self.home / f"retention_test_{i}.txt"
+                plan = Plan(
+                    [EditFile(p, lambda _old, idx=i: f"val-{idx}\n".encode(), None, f"write {i}")]
+                )
+                with patch(
+                    "one_setup_all_agents.engine.journal.now_iso", return_value=journal.now_iso(t)
+                ):
+                    apply_plan(self.env, plan, label=f"sync-{i}", run_cli=FakeRunner())
 
         # Also add an old open operation
         old_open = journal.begin(
@@ -169,7 +179,7 @@ class FixT6Tests(EngineCase):
         # Old open op survives
         self.assertIn(old_open.id, op_ids)
 
-        # Repeated undo can undo exactly 20 operations
+        # Repeated undo can undo 20 unpinned operations plus the pinned init
         undone = 0
         while True:
             u_ctx, out, _ = self._ctx()
@@ -178,7 +188,7 @@ class FixT6Tests(EngineCase):
                 break
             self.assertEqual(c, 0)
             undone += 1
-        self.assertEqual(undone, 20)
+        self.assertEqual(undone, 21)
 
     # 4. keep=0 behavior raises ValueError
     def test_prune_keep_zero_raises_value_error(self):
@@ -361,3 +371,24 @@ class FixT6Tests(EngineCase):
         self.assertNotIn(secret, err_s.getvalue())
         self.assertNotIn(literal_header, out_s.getvalue())
         self.assertNotIn(literal_header, err_s.getvalue())
+
+    def test_thirty_sync_and_undo_cycles_leave_at_most_forty_one_op_folders(self):
+        ctx, _, _ = self._ctx()
+        main(["init", "--yes"], context=ctx)
+
+        for i in range(30):
+            (self.env.config_dir / INSTRUCTIONS_NAME).write_text(
+                f"# Instructions iteration {i}\n", encoding="utf-8"
+            )
+            ctx_s, _, _ = self._ctx()
+            c_sync = main(["sync", "--yes"], context=ctx_s)
+            self.assertEqual(c_sync, 0)
+
+            ctx_u, _, _ = self._ctx()
+            c_undo = main(["undo"], context=ctx_u)
+            self.assertEqual(c_undo, 0)
+
+        op_folders = [p for p in (self.env.state_dir / "ops").iterdir() if p.is_dir()]
+        # at most 20 done + 20 undone/undo terminal + 1 pinned init = 41
+        self.assertLessEqual(len(op_folders), 41)
+        self.assertEqual(len(op_folders), 21)
