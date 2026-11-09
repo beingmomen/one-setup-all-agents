@@ -12,6 +12,7 @@ from ..engine.apply import apply_plan
 from ..engine.errors import (
     ApplyError,
     EngineLockedError,
+    JournalError,
     OpenOperationError,
     PlanError,
 )
@@ -72,7 +73,11 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
     chosen_ids = sorted(candidate_ids)
     desired = desired_all(source_config, chosen_ids)
     active_adapters = [adapters_by_id[tid] for tid in chosen_ids]
-    plan = build_plan(ctx.env, active_adapters, desired, kinds=kinds)
+    try:
+        plan = build_plan(ctx.env, active_adapters, desired, kinds=kinds)
+    except JournalError as exc:
+        warn(ctx, f"cannot read ledger.json ({exc}); restore from backup or reinitialise")
+        return 1
 
     # (7) Print plan
     say(ctx, render_plan(plan))
@@ -121,12 +126,19 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
     except (PlanError, ApplyError) as exc:
         warn(ctx, str(exc))
         return 1
+    except JournalError as exc:
+        warn(ctx, f"cannot read ledger.json ({exc}); restore from backup or reinitialise")
+        return 1
 
     if op_id:
         say(ctx, f"applied operation {op_id}")
 
     # (13) Re-plan verification
-    re_plan = build_plan(ctx.env, active_adapters, desired, kinds=kinds)
+    try:
+        re_plan = build_plan(ctx.env, active_adapters, desired, kinds=kinds)
+    except JournalError as exc:
+        warn(ctx, f"cannot read ledger.json ({exc}); restore from backup or reinitialise")
+        return 1
     if re_plan.executable:
         warn(ctx, f"warning: {len(re_plan.executable)} change(s) still pending after apply")
 

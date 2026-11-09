@@ -12,8 +12,6 @@ from one_setup_all_agents import __version__
 from one_setup_all_agents.cli import build_parser, main
 
 COMMANDS = ("init", "sync", "status", "undo")
-# Commands that are still stubs in pre-alpha; each phase removes its command.
-STUB_COMMANDS: tuple[str, ...] = ()
 
 
 def _run_main(argv):
@@ -82,14 +80,6 @@ class HiddenCommandTests(unittest.TestCase):
         code, _, err = _run_main(["_run"])
         self.assertEqual(code, 2)  # usage error from the runner, not "not implemented"
         self.assertIn("usage", err)
-
-
-class PreAlphaBehaviorTests(unittest.TestCase):
-    def test_commands_report_not_implemented_and_change_nothing(self):
-        self.assertEqual(STUB_COMMANDS, ())
-        for command in COMMANDS:
-            code, out, _ = _run_main([command, "--help"])
-            self.assertEqual(code, 0)
 
 
 class ModuleEntryPointTests(unittest.TestCase):

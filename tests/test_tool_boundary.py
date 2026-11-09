@@ -10,8 +10,6 @@ Scope:
   `ADAPTERS` (discovered from the registry, so a new adapter is exempt and its name is banned
   everywhere else automatically) and `_core/`.
 - `_core/` contains internal shared utilities (formatting, masking, runner).
-
-
 - `adapters/__init__.py` may carry the tool names only on its import lines and registry lines.
 
 The dynamic half, with a real drop-in adapter, is `test_drop_in_tool.py`.

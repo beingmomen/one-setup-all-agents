@@ -3,11 +3,12 @@
 The four public commands (`init`, `sync`, `status`, `undo`) are implemented.
 
 Exit codes:
-    0: ok or nothing to do
-    1: refused or failed, nothing left changed
-    2: usage error (argparse)
+    0: ok or nothing to do (in sync, no-op, dry run without conflicts, or successful revert)
+    1: refused or failed (error, lock, unforced drift, or inverse command skipped in undo --force)
+    2: usage error (argparse) or `status` differences/conflicts/unreadable config files exist
+    3: `sync` conflicts exist in dry run or unresolved conflicts remain after apply
 
-Planned behavior of each command (v0.1, global scope only):
+Behavior of each command (v0.1, global scope only):
 
     init    Detect installed tools, import what is already configured (instructions,
             MCP servers, skills), take a full safety snapshot first, and create the

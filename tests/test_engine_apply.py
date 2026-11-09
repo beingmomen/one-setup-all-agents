@@ -439,9 +439,7 @@ class AutomaticRevertTests(ApplyCase):
 
     def test_no_secret_reaches_an_error_message_or_the_output(self):
         secret = "FAKE-ARG-SECRET-bbb222"
-        failing = RunCli(
-            ["tool", "add", "--token", secret], ["tool", "remove"], f"add with token={secret}"
-        )
+        failing = RunCli(["tool", "add"], ["tool", "remove"], f"add with token={secret}")
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             with self.assertRaises(ApplyError) as ctx:

@@ -44,7 +44,11 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
         return 0
 
     if getattr(args, "list", False):
-        undoable = journal.list_undoable(ctx.env.state_dir)
+        try:
+            undoable = journal.list_undoable(ctx.env.state_dir)
+        except journal.JournalError as exc:
+            warn(ctx, f"cannot read ledger.json ({exc}); restore from backup or reinitialise")
+            return 1
         if not undoable:
             say(ctx, "No undoable operations.")
             return 0
@@ -82,6 +86,9 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
         return 1
     except (EngineLockedError, OpenOperationError) as exc:
         warn(ctx, str(exc))
+        return 1
+    except journal.JournalError as exc:
+        warn(ctx, f"cannot read ledger.json ({exc}); restore from backup or reinitialise")
         return 1
 
     if result is not None and result.warnings:

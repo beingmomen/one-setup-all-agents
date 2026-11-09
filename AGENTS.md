@@ -1,6 +1,6 @@
 # one-setup-all-agents
 
-One setup for all your AI coding agents: a shared agent config for Claude Code, Codex, OpenCode and Antigravity. The command is `all-agents` (`init`, `sync`, `status`, `undo`). Status: pre-alpha (decisions, skeleton and a ported core; the public commands are not implemented yet).
+One setup for all your AI coding agents: a shared agent config for Claude Code, Codex, OpenCode and Antigravity. The command is `all-agents` (`init`, `sync`, `status`, `undo`). Status: the public commands exist now (pre-alpha, not released).
 
 ## Rules for AI tools working in this repo
 

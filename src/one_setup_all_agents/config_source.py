@@ -126,10 +126,10 @@ def source_exists(config_dir: Path) -> bool:
 
 def load_source_texts(
     config_toml: str,
+    valid_tool_ids: Sequence[str],
     mcp_jsonc: str | None = None,
     instructions: str | None = None,
     appendices: Mapping[str, str] | None = None,
-    valid_tool_ids: Sequence[str] | None = None,
     skills: Sequence[SkillRef] | None = None,
     path: Path = Path("."),
 ) -> SourceConfig:
@@ -150,9 +150,9 @@ def load_source_texts(
 
     for key in toml_data:
         if key not in ("version", "tools", "projects"):
-            raise SourceError(f"unknown top-level key '{key}' in '{SOURCE_CONFIG_NAME}'")
+            raise SourceError(f"unknown top-level key '{mask_text(key)}' in '{SOURCE_CONFIG_NAME}'")
 
-    valid_ids = set(valid_tool_ids) if valid_tool_ids is not None else None
+    valid_ids = set(valid_tool_ids)
     tools_map: dict[str, ToolSettings] = {}
 
     tools_table = toml_data.get("tools", {})
@@ -162,7 +162,7 @@ def load_source_texts(
     for pos, (tool_id, settings) in enumerate(tools_table.items(), 1):
         if not isinstance(tool_id, str):
             raise SourceError(f"tool id at [tools] position #{pos} must be a string")
-        if valid_ids is not None and tool_id not in valid_ids:
+        if tool_id not in valid_ids:
             raise SourceError(
                 f"unknown tool id at [tools] position #{pos} in '{SOURCE_CONFIG_NAME}'"
             )
@@ -205,7 +205,7 @@ def load_source_texts(
 
         for key in mcp_data:
             if key not in ("version", "servers"):
-                raise SourceError(f"unknown top-level key '{key}' in '{MCP_NAME}'")
+                raise SourceError(f"unknown top-level key '{mask_text(key)}' in '{MCP_NAME}'")
 
         servers_obj = mcp_data.get("servers", {})
         if not isinstance(servers_obj, dict):
@@ -440,7 +440,7 @@ def load_source_texts(
     appendices_map: dict[str, str] = {}
     if appendices:
         for tool_id, raw_app in sorted(appendices.items()):
-            if valid_ids is not None and tool_id not in valid_ids:
+            if tool_id not in valid_ids:
                 warnings.append(
                     f"appendix file 'instructions.{tool_id}.md' "
                     f"references unknown tool id '{tool_id}'"
@@ -494,12 +494,19 @@ def load_source(config_dir: Path, adapter_ids: Sequence[str]) -> SourceConfig:
         except (UnicodeDecodeError, OSError) as exc:
             raise SourceError(f"cannot read '{INSTRUCTIONS_NAME}'") from exc
 
+    valid_ids = set(adapter_ids)
     appendices: dict[str, str] = {}
+    appendix_warnings: list[str] = []
     for item in sorted(config_dir.glob("instructions.*.md")):
         name = item.name
         if name == INSTRUCTIONS_NAME:
             continue
         tool_id = name[len("instructions.") : -len(".md")]
+        if tool_id not in valid_ids:
+            appendix_warnings.append(
+                f"appendix file 'instructions.{tool_id}.md' references unknown tool id '{tool_id}'"
+            )
+            continue
         try:
             raw = item.read_bytes()
             appendices[tool_id] = raw.decode("utf-8-sig")
@@ -536,7 +543,8 @@ def load_source(config_dir: Path, adapter_ids: Sequence[str]) -> SourceConfig:
         skills=skills,
         path=config_dir,
     )
-    if skill_warnings:
+    extra_warnings = appendix_warnings + skill_warnings
+    if extra_warnings:
         sc = SourceConfig(
             path=sc.path,
             tools=sc.tools,
@@ -544,7 +552,7 @@ def load_source(config_dir: Path, adapter_ids: Sequence[str]) -> SourceConfig:
             appendices=sc.appendices,
             servers=sc.servers,
             skills=sc.skills,
-            warnings=tuple(list(sc.warnings) + skill_warnings),
+            warnings=tuple(list(sc.warnings) + extra_warnings),
         )
     return sc
 

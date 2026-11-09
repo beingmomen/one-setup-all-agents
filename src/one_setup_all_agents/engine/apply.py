@@ -26,7 +26,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from .._core.mask import mask_args, mask_text
-from ..model import EditFile, Env, ItemRef, Link, Plan, RunCli
+from ..model import Conflict, EditFile, Env, ItemRef, Kind, Link, Plan, RunCli
 from . import backup, fsops, journal, links
 from .atomic import atomic_write, resolve_target
 from .errors import (
@@ -53,6 +53,12 @@ def _validate(ops: list) -> None:
     """Refuse a plan the engine cannot run, before anything is touched (docs/decisions/0005)."""
     for op in ops:
         if isinstance(op, RunCli):
+            argv_list = list(op.argv)
+            inv_list = list(op.inverse_argv)
+            if mask_args(argv_list) != argv_list or mask_args(inv_list) != inv_list:
+                ref = next(iter(op.claims + op.releases), None)
+                item = ref.key if ref else mask_text(op.description)
+                raise PlanError(f"refusing RunCli for {item}: command looks like a secret")
             if not list(op.argv) or not all(isinstance(a, str) for a in op.argv):
                 raise PlanError(f"RunCli '{mask_text(op.description)}' has no usable argv")
             if not list(op.inverse_argv) or not all(isinstance(a, str) for a in op.inverse_argv):
@@ -262,6 +268,24 @@ def apply_plan(
     failed (the entries already done were reverted; `ApplyError.reverted` says whether that
     finished).
     """
+    for idx, op in enumerate(plan.ops):
+        if isinstance(op, RunCli):
+            argv_list = list(op.argv)
+            inv_list = list(op.inverse_argv)
+            if mask_args(argv_list) != argv_list or mask_args(inv_list) != inv_list:
+                ref = next(iter(op.claims + op.releases), None)
+                tool = ref.tool if ref else "engine"
+                kind = ref.kind if ref else Kind.MCP
+                key = ref.key if ref else mask_text(op.description)
+                item = key
+                plan.ops[idx] = Conflict(
+                    tool=tool,
+                    kind=kind,
+                    key=key,
+                    reason="command looks like a secret",
+                )
+                raise PlanError(f"refusing RunCli for {item}: command looks like a secret")
+
     ops = plan.executable
     if not ops and not adopt:
         return None
@@ -386,6 +410,7 @@ def recover_locked(env: Env, runner: Runner, *, force: bool = False) -> list[str
             if target_op.status == journal.UNDONE or _all_entries_reverted(env, target_op):
                 if target_op.status != journal.UNDONE:
                     target_op.set_status(journal.UNDONE, reverted_at=journal.now_iso())
+                journal.revert_owned(env.state_dir, target_op.data.get("owned_delta"))
                 target_op.data["pending_revert"] = False
                 target_op.save()
                 op.set_status(journal.DONE)

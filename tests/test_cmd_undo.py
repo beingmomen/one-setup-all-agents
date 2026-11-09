@@ -634,18 +634,60 @@ class CmdUndoTests(EngineCase):
         ctx_init, _, _ = self._ctx()
         main(["init", "--yes"], context=ctx_init)
 
-        op = journal.begin(self.state, "crashed-op")
+        undoable = journal.list_undoable(self.state)
+        self.assertTrue(len(undoable) > 0)
+        target_id = undoable[0]["id"]
+        target_op = journal.load(self.state, target_id)
+        target_op.set_status(journal.UNDONE)
+
+        undo_op = journal.begin(self.state, f"undo {target_id}", kind="undo", undoes=target_id)
 
         real_load = journal.load
 
         def failing_load(state_dir, op_id):
-            if op_id == op.id:
+            stack_names = []
+            cur = inspect.currentframe()
+            while cur:
+                stack_names.append(cur.f_code.co_name)
+                cur = cur.f_back
+            if (
+                "undo" in stack_names
+                and "recover_locked" not in stack_names
+                and op_id == undo_op.id
+            ):
                 raise OSError("simulated disk corruption loading journal")
             return real_load(state_dir, op_id)
 
         with patch("one_setup_all_agents.engine.undo.journal.load", side_effect=failing_load):
             with self.assertRaises(OSError):
                 undo_mod.undo(self.env, run_cli=self.runner)
+
+    def test_undo_fast_path_reverts_owned_after_interrupted_revert_owned(self):
+        initial_owned = journal.owned_items(self.state)
+        self.assertEqual(initial_owned, set())
+
+        ctx_init, _, _ = self._ctx()
+        self.assertEqual(main(["init", "--yes"], context=ctx_init), 0)
+
+        owned_after_init = journal.owned_items(self.state)
+        self.assertTrue(len(owned_after_init) > 0)
+
+        def failing_revert_owned(state_dir, delta):
+            raise KeyboardInterrupt("simulated interrupt during revert_owned")
+
+        with patch(
+            "one_setup_all_agents.engine.revert.journal.revert_owned",
+            side_effect=failing_revert_owned,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                undo_mod.undo(self.env, run_cli=self.runner)
+
+        # undo again: should recover and revert ownership
+        ctx_undo, out_undo, err_undo = self._ctx()
+        code = main(["undo"], context=ctx_undo)
+        self.assertEqual(code, 0, f"undo failed: {err_undo.getvalue()}")
+
+        self.assertEqual(journal.owned_items(self.state), initial_owned)
 
 
 if __name__ == "__main__":

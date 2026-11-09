@@ -46,6 +46,8 @@ def _proposals_differ(p1: ImportProposal, p2: ImportProposal) -> bool:
             return True
         if p1.instructions.skipped != p2.instructions.skipped:
             return True
+        if p1.instructions.replace_differing != p2.instructions.replace_differing:
+            return True
 
     # 2. servers: compare servers dict
     if p1.servers != p2.servers:
@@ -132,11 +134,13 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
 
     # 5. propose
     ask_fn = ctx.read_line if (ctx.is_interactive and not getattr(args, "yes", False)) else None
+    replace_differing = False if getattr(args, "yes", False) else None
     try:
         proposal = propose(
             readings,
             detections,
             from_tool=from_tool,
+            replace_differing=replace_differing,
             ask=ask_fn,
             env=ctx.env,
             adapters=adapters_by_id,
@@ -155,6 +159,14 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
     say(ctx, "Import proposal:")
     if proposal.instructions is not None:
         say(ctx, "  - Instructions: imported")
+        if proposal.instructions.skipped:
+            tools_str = ", ".join(sorted(proposal.instructions.skipped))
+            say(
+                ctx,
+                f"    differing instructions in {tools_str} left unowned "
+                "(status will show conflicts; to adopt later: "
+                "edit the file to match, or delete it, then sync)",
+            )
     else:
         say(ctx, "  - Instructions: none")
     server_names = sorted(proposal.servers.keys())
@@ -198,6 +210,10 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
         and getattr(proposal.instructions, "from_tool", None) is not None
     ):
         resolved_from_tool = proposal.instructions.from_tool
+
+    resolved_replace = (
+        proposal.instructions.replace_differing if proposal.instructions is not None else None
+    )
 
     def _validate_source_ops(ops: Sequence[object]) -> None:
         config_text: str | None = None
@@ -265,6 +281,7 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
                         curr_readings,
                         detections,
                         from_tool=resolved_from_tool,
+                        replace_differing=resolved_replace,
                         ask=None,
                         env=ctx.env,
                         adapters=adapters_by_id,

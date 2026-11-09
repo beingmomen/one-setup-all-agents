@@ -648,12 +648,14 @@ class ConfigSourceTests(unittest.TestCase):
 
     def test_load_source_texts_invalid_toml_raises_source_error(self):
         with self.assertRaises(SourceError) as ctx:
-            load_source_texts("not valid toml [[")
+            load_source_texts("not valid toml [[", valid_tool_ids=self.adapter_ids)
         self.assertIn("failed to parse", str(ctx.exception))
 
     def test_load_source_texts_invalid_mcp_raises_source_error(self):
         with self.assertRaises(SourceError) as ctx:
-            load_source_texts("version = 1\n", mcp_jsonc="{ not valid jsonc")
+            load_source_texts(
+                "version = 1\n", valid_tool_ids=self.adapter_ids, mcp_jsonc="{ not valid jsonc"
+            )
         self.assertIn("failed to parse", str(ctx.exception))
 
     def test_load_source_texts_unknown_tool_id_raises_source_error(self):
@@ -681,7 +683,9 @@ class ConfigSourceTests(unittest.TestCase):
             weird_name: ServerEntry(server=McpServer(name=weird_name, command="echo")),
         }
         rendered = render_mcp_source(entries)
-        cfg = load_source_texts(config_toml="version = 1\n", mcp_jsonc=rendered)
+        cfg = load_source_texts(
+            config_toml="version = 1\n", valid_tool_ids=self.adapter_ids, mcp_jsonc=rendered
+        )
         self.assertIn(weird_name, cfg.servers)
 
     def test_startup_timeout_sec_rejects_nan_and_infinities(self):
@@ -695,7 +699,9 @@ class ConfigSourceTests(unittest.TestCase):
   }
 }"""
         with self.assertRaises(SourceError) as ctx:
-            load_source_texts(config_toml="version = 1\n", mcp_jsonc=mcp_nan)
+            load_source_texts(
+                config_toml="version = 1\n", valid_tool_ids=self.adapter_ids, mcp_jsonc=mcp_nan
+            )
         self.assertIn(
             "'startup_timeout_sec' in server 'srv' must be a positive number",
             str(ctx.exception),
@@ -711,7 +717,9 @@ class ConfigSourceTests(unittest.TestCase):
   }
 }"""
         with self.assertRaises(SourceError) as ctx:
-            load_source_texts(config_toml="version = 1\n", mcp_jsonc=mcp_inf)
+            load_source_texts(
+                config_toml="version = 1\n", valid_tool_ids=self.adapter_ids, mcp_jsonc=mcp_inf
+            )
         self.assertIn(
             "'startup_timeout_sec' in server 'srv' must be a positive number",
             str(ctx.exception),
@@ -735,7 +743,9 @@ class ConfigSourceTests(unittest.TestCase):
   }}
 }}"""
         with self.assertRaises(SourceError) as ctx:
-            load_source_texts(config_toml="version = 1\n", mcp_jsonc=mcp_text)
+            load_source_texts(
+                config_toml="version = 1\n", valid_tool_ids=self.adapter_ids, mcp_jsonc=mcp_text
+            )
         self.assertNotIn(secret_key, str(ctx.exception))
         self.assertIn("***", str(ctx.exception))
 
@@ -755,7 +765,9 @@ class ConfigSourceTests(unittest.TestCase):
   }
 }"""
         with self.assertRaises(SourceError) as ctx:
-            load_source_texts(config_toml="version = 1\n", mcp_jsonc=mcp_text)
+            load_source_texts(
+                config_toml="version = 1\n", valid_tool_ids=self.adapter_ids, mcp_jsonc=mcp_text
+            )
         self.assertEqual(str(ctx.exception), "server 'srv' is invalid")
         self.assertNotIn("non_secret_value", str(ctx.exception))
 

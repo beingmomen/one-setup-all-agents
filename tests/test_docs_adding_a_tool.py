@@ -76,10 +76,20 @@ class AddingAToolDocsTests(unittest.TestCase):
             f"removable_mcp default in docs ({match_removable.group(1)}) must equal code ({expected_removable})",
         )
 
-        self.assertIn(
-            "unwritten_mcp",
+        expected_unwritten = dummy.unwritten_mcp()
+        match_unwritten = re.search(
+            r'unwritten_mcp.*?defaults to [`"]([^`"]+)[`"]',
             self.doc_text,
-            "docs/adding-a-tool.md must document unwritten_mcp hook",
+            re.IGNORECASE,
+        )
+        self.assertIsNotNone(
+            match_unwritten,
+            "docs/adding-a-tool.md must document the default for unwritten_mcp",
+        )
+        self.assertEqual(
+            match_unwritten.group(1),
+            repr(expected_unwritten),
+            f"unwritten_mcp default in docs ({match_unwritten.group(1)}) must equal code ({repr(expected_unwritten)})",
         )
 
     def test_doc_contains_no_real_tool_names_outside_marked_excerpts(self) -> None:

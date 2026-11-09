@@ -410,14 +410,14 @@ class UndoMatrixRunCliTests(EngineCase):
     def test_secret_masking_in_error_text(self):
         secret = "VERY_CONFIDENTIAL_KEY_12345"
         op = RunCli(
-            argv=("tool", "--token", secret),
-            inverse_argv=("tool", "--token", secret),
+            argv=("tool", "config"),
+            inverse_argv=("tool", "config"),
             description="set-token config",
         )
         apply.apply_plan(self.env, Plan([op]), label="secret-op", run_cli=self.runner)
 
         def runner_raises(argv: list[str]) -> int:
-            raise RuntimeError("server connection failed")
+            raise RuntimeError(f"server connection failed: {secret}")
 
         with self.assertRaises(RevertError) as ctx:
             undo_mod.undo(self.env, run_cli=runner_raises)

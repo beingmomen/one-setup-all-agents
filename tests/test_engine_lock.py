@@ -12,12 +12,13 @@ from one_setup_all_agents.engine.errors import EngineLockedError
 from one_setup_all_agents.engine.lock import engine_lock
 
 HOLDER = r"""
+import os
 import sys
 sys.path.insert(0, sys.argv[1])
 from pathlib import Path
 from one_setup_all_agents.engine.lock import engine_lock
 with engine_lock(Path(sys.argv[2])):
-    print("held", flush=True)
+    print(f"held {os.getpid()}", flush=True)
     sys.stdin.readline()
 """
 
@@ -73,11 +74,13 @@ class LockTests(EngineCase):
             child.stdout.close()
 
         self.addCleanup(reap)
-        self.assertEqual(child.stdout.readline().strip(), "held")
+        line = child.stdout.readline().strip()
+        prefix, _, holder_pid = line.partition(" ")
+        self.assertEqual(prefix, "held")
         with self.assertRaises(EngineLockedError) as ctx:
             with engine_lock(self.state):
                 pass
-        self.assertIn(f"pid {child.pid}", str(ctx.exception))
+        self.assertIn(f"pid {holder_pid}", str(ctx.exception))
         child.stdin.write("\n")
         child.stdin.flush()
         child.wait(timeout=30)

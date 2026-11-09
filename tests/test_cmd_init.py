@@ -516,7 +516,7 @@ class CmdInitTests(unittest.TestCase):
 
         prompts_asked: list[str] = []
 
-        answers = {"Choose": "1", "Proceed": "y"}
+        answers = {"Choose": "1", "replace": "y", "Proceed": "y"}
 
         def counting_read_line(prompt: str) -> str:
             prompts_asked.append(prompt)
@@ -542,10 +542,267 @@ class CmdInitTests(unittest.TestCase):
             code = init.run(args, ctx)
 
         self.assertEqual(code, 0)
-        self.assertEqual(len(prompts_asked), 2)
+        self.assertEqual(len(prompts_asked), 3)
         inst_file = self.env.config_dir / "instructions.md"
         self.assertTrue(inst_file.is_file())
         self.assertEqual(inst_file.read_text(encoding="utf-8"), "# Instructions A\n")
+
+    def test_init_interactive_different_instructions_replace_yes_adopts_and_sync_replaces(self):
+        import json
+
+        adapter_a = [a for a in all_adapters() if a.id == "claude"][0]
+        adapter_b = [a for a in all_adapters() if a.id == "codex"][0]
+
+        paths_a = adapter_a.paths(self.env, Scope.GLOBAL)
+        paths_a.instructions.parent.mkdir(parents=True, exist_ok=True)
+        paths_a.instructions.write_text("# Instructions A\n", encoding="utf-8")
+
+        paths_b = adapter_b.paths(self.env, Scope.GLOBAL)
+        paths_b.instructions.parent.mkdir(parents=True, exist_ok=True)
+        paths_b.instructions.write_text("# Instructions B\n", encoding="utf-8")
+
+        detection_a = Detection(
+            installed=True, tool=adapter_a.id, label=adapter_a.label, binary=Path("/bin/claude")
+        )
+        detection_b = Detection(
+            installed=True, tool=adapter_b.id, label=adapter_b.label, binary=Path("/bin/codex")
+        )
+        detections = [detection_a, detection_b]
+
+        prompts_asked: list[str] = []
+        answers = {"Choose": "2", "replace": "y", "Proceed": "y"}
+
+        def counting_read_line(prompt: str) -> str:
+            prompts_asked.append(prompt)
+            for k, v in answers.items():
+                if k in prompt:
+                    return v
+            raise EOFError(f"unexpected prompt #{len(prompts_asked)}: {prompt}")
+
+        ctx = self._ctx(is_interactive=True, read_line=counting_read_line)
+
+        with (
+            patch("one_setup_all_agents.commands.init.detect_all", return_value=detections),
+            patch("one_setup_all_agents.commands.status.detect_all", return_value=detections),
+            patch("one_setup_all_agents.commands.sync.detect_all", return_value=detections),
+        ):
+            code_init = main(["init"], context=ctx)
+            self.assertEqual(code_init, 0)
+            self.assertEqual(len(prompts_asked), 3)
+
+            # tool B was chosen, instructions.md has B
+            inst_file = self.env.config_dir / "instructions.md"
+            self.assertEqual(inst_file.read_text(encoding="utf-8"), "# Instructions B\n")
+
+            # run sync: tool A's file is replaced with shared text
+            out_sync = io.StringIO()
+            err_sync = io.StringIO()
+            ctx_sync = CommandContext(
+                env=self.env,
+                read_line=lambda p: "",
+                is_interactive=False,
+                out=out_sync,
+                err=err_sync,
+            )
+            code_sync = main(["sync", "--yes"], context=ctx_sync)
+            self.assertEqual(code_sync, 0, f"sync failed: {err_sync.getvalue()}")
+            self.assertEqual(paths_a.instructions.read_text(encoding="utf-8"), "# Instructions B\n")
+
+            # run status: no conflict
+            out_status = io.StringIO()
+            err_status = io.StringIO()
+            ctx_status = CommandContext(
+                env=self.env,
+                read_line=lambda p: "",
+                is_interactive=False,
+                out=out_status,
+                err=err_status,
+            )
+            code_status = main(["status", "--json"], context=ctx_status)
+            self.assertEqual(code_status, 0, f"status failed: {err_status.getvalue()}")
+            data = json.loads(out_status.getvalue())
+            for tool in data["tools"]:
+                self.assertNotEqual(tool["kinds"]["instructions"]["state"], "conflict")
+
+    def test_init_interactive_different_instructions_replace_no_leaves_conflict(self):
+        import json
+
+        adapter_a = [a for a in all_adapters() if a.id == "claude"][0]
+        adapter_b = [a for a in all_adapters() if a.id == "codex"][0]
+
+        paths_a = adapter_a.paths(self.env, Scope.GLOBAL)
+        paths_a.instructions.parent.mkdir(parents=True, exist_ok=True)
+        paths_a.instructions.write_text("# Instructions A\n", encoding="utf-8")
+
+        paths_b = adapter_b.paths(self.env, Scope.GLOBAL)
+        paths_b.instructions.parent.mkdir(parents=True, exist_ok=True)
+        paths_b.instructions.write_text("# Instructions B\n", encoding="utf-8")
+
+        detection_a = Detection(
+            installed=True, tool=adapter_a.id, label=adapter_a.label, binary=Path("/bin/claude")
+        )
+        detection_b = Detection(
+            installed=True, tool=adapter_b.id, label=adapter_b.label, binary=Path("/bin/codex")
+        )
+        detections = [detection_a, detection_b]
+
+        prompts_asked: list[str] = []
+        answers = {"Choose": "2", "replace": "n", "Proceed": "y"}
+
+        def counting_read_line(prompt: str) -> str:
+            prompts_asked.append(prompt)
+            for k, v in answers.items():
+                if k in prompt:
+                    return v
+            raise EOFError(f"unexpected prompt #{len(prompts_asked)}: {prompt}")
+
+        ctx = self._ctx(is_interactive=True, read_line=counting_read_line)
+
+        with (
+            patch("one_setup_all_agents.commands.init.detect_all", return_value=detections),
+            patch("one_setup_all_agents.commands.status.detect_all", return_value=detections),
+        ):
+            code_init = main(["init"], context=ctx)
+            self.assertEqual(code_init, 0)
+            self.assertEqual(len(prompts_asked), 3)
+
+            # run status: tool A has conflict
+            out_status = io.StringIO()
+            err_status = io.StringIO()
+            ctx_status = CommandContext(
+                env=self.env,
+                read_line=lambda p: "",
+                is_interactive=False,
+                out=out_status,
+                err=err_status,
+            )
+            code_status = main(["status", "--json"], context=ctx_status)
+            self.assertEqual(code_status, 2)
+            data = json.loads(out_status.getvalue())
+            tool_a_data = [t for t in data["tools"] if t["id"] == adapter_a.id][0]
+            self.assertEqual(tool_a_data["kinds"]["instructions"]["state"], "conflict")
+
+    def test_init_snapshot_retry_preserves_interactive_choices_without_reasking(self):
+        from one_setup_all_agents.commands import init
+        from one_setup_all_agents.engine.errors import BackupError
+
+        adapter_a = [a for a in all_adapters() if a.id == "claude"][0]
+        adapter_b = [a for a in all_adapters() if a.id == "codex"][0]
+
+        paths_a = adapter_a.paths(self.env, Scope.GLOBAL)
+        paths_a.instructions.parent.mkdir(parents=True, exist_ok=True)
+        paths_a.instructions.write_text("# Instructions A\n", encoding="utf-8")
+
+        paths_b = adapter_b.paths(self.env, Scope.GLOBAL)
+        paths_b.instructions.parent.mkdir(parents=True, exist_ok=True)
+        paths_b.instructions.write_text("# Instructions B\n", encoding="utf-8")
+
+        detection_a = Detection(
+            installed=True, tool=adapter_a.id, label=adapter_a.label, binary=Path("/bin/claude")
+        )
+        detection_b = Detection(
+            installed=True, tool=adapter_b.id, label=adapter_b.label, binary=Path("/bin/codex")
+        )
+        detections = [detection_a, detection_b]
+
+        prompts_asked: list[str] = []
+        answers = {"Choose": "2", "replace": "y", "Proceed": "y"}
+
+        def counting_read_line(prompt: str) -> str:
+            prompts_asked.append(prompt)
+            for k, v in answers.items():
+                if k in prompt:
+                    return v
+            raise EOFError(f"unexpected prompt #{len(prompts_asked)}: {prompt}")
+
+        ctx = self._ctx(is_interactive=True, read_line=counting_read_line)
+
+        call_count = [0]
+        orig_apply = init.apply_plan
+
+        def fake_apply(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise BackupError("transient backup failure")
+            return orig_apply(*args, **kwargs)
+
+        with (
+            patch("one_setup_all_agents.commands.init.detect_all", return_value=detections),
+            patch("one_setup_all_agents.commands.init.apply_plan", side_effect=fake_apply),
+        ):
+            code_init = main(["init"], context=ctx)
+            self.assertEqual(code_init, 0, f"init failed: {ctx.err.getvalue()}")
+            self.assertEqual(call_count[0], 2)
+            self.assertEqual(len(prompts_asked), 3)
+
+    def test_init_yes_never_replaces_differing_instructions_and_advises_adoption(self):
+        import json
+
+        adapter_a = [a for a in all_adapters() if a.id == "claude"][0]
+        adapter_b = [a for a in all_adapters() if a.id == "codex"][0]
+
+        paths_a = adapter_a.paths(self.env, Scope.GLOBAL)
+        paths_a.instructions.parent.mkdir(parents=True, exist_ok=True)
+        paths_a.instructions.write_text("# Instructions A\n", encoding="utf-8")
+
+        paths_b = adapter_b.paths(self.env, Scope.GLOBAL)
+        paths_b.instructions.parent.mkdir(parents=True, exist_ok=True)
+        paths_b.instructions.write_text("# Instructions B\n", encoding="utf-8")
+
+        detection_a = Detection(
+            installed=True, tool=adapter_a.id, label=adapter_a.label, binary=Path("/bin/claude")
+        )
+        detection_b = Detection(
+            installed=True, tool=adapter_b.id, label=adapter_b.label, binary=Path("/bin/codex")
+        )
+        detections = [detection_a, detection_b]
+
+        ctx = self._ctx(is_interactive=False)
+
+        with (
+            patch("one_setup_all_agents.commands.init.detect_all", return_value=detections),
+            patch("one_setup_all_agents.commands.status.detect_all", return_value=detections),
+            patch("one_setup_all_agents.commands.sync.detect_all", return_value=detections),
+        ):
+            code_init = main(["init", "--yes", "--from", adapter_b.id], context=ctx)
+            self.assertEqual(code_init, 0, f"init failed: {ctx.err.getvalue()}")
+
+            # summary advises how to adopt later
+            out_text = ctx.out.getvalue()
+            self.assertIn("differing instructions in", out_text)
+            self.assertIn("left unowned", out_text)
+            self.assertIn("edit the file to match, or delete it, then sync", out_text)
+
+            # tool A's file stays unowned and status shows conflicts
+            out_status = io.StringIO()
+            err_status = io.StringIO()
+            ctx_status = CommandContext(
+                env=self.env,
+                read_line=lambda p: "",
+                is_interactive=False,
+                out=out_status,
+                err=err_status,
+            )
+            code_status = main(["status", "--json"], context=ctx_status)
+            self.assertEqual(code_status, 2)
+            data = json.loads(out_status.getvalue())
+            tool_a_data = [t for t in data["tools"] if t["id"] == adapter_a.id][0]
+            self.assertEqual(tool_a_data["kinds"]["instructions"]["state"], "conflict")
+
+            # run sync: tool A's file is untouched
+            out_sync = io.StringIO()
+            err_sync = io.StringIO()
+            ctx_sync = CommandContext(
+                env=self.env,
+                read_line=lambda p: "",
+                is_interactive=False,
+                out=out_sync,
+                err=err_sync,
+            )
+            code_sync = main(["sync", "--yes"], context=ctx_sync)
+            self.assertEqual(code_sync, 3)  # conflict on unowned file skipped
+            self.assertIn("Conflicts (left alone, not changed)", out_sync.getvalue())
+            self.assertEqual(paths_a.instructions.read_text(encoding="utf-8"), "# Instructions A\n")
 
 
 if __name__ == "__main__":

@@ -50,6 +50,7 @@ class InstructionsProposal:
     skipped: list[str] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
     from_tool: str | None = None
+    replace_differing: bool = False
 
 
 @dataclass
@@ -107,6 +108,7 @@ def propose_instructions(
     readings: Sequence[ToolReading],
     *,
     from_tool: str | None = None,
+    replace_differing: bool | None = None,
     ask: Callable[[str], str] | None = None,
     env: Env | None = None,
     adapters: Mapping[str, ToolAdapter] | None = None,
@@ -136,6 +138,7 @@ def propose_instructions(
     distinct_texts = {c[2] for c in candidates}
 
     chosen_from: str | None = None
+    should_replace = False
     if len(distinct_texts) == 1:
         core = candidates[0][2]
         adopt = [c[0] for c in candidates]
@@ -148,17 +151,6 @@ def propose_instructions(
                 raise ValueError(f"tool '{from_tool}' has no instructions to import")
             core = matched[0][2]
             chosen_from = from_tool
-            should_replace = False
-            if ask is not None:
-                ans = ask("replace the other files with the shared text on the next sync? [y/N]: ")
-                should_replace = str(ans).strip().lower() in ("y", "yes")
-
-            if should_replace:
-                adopt = [c[0] for c in candidates]
-                skipped = []
-            else:
-                adopt = [c[0] for c in candidates if c[2] == core]
-                skipped = [c[0] for c in candidates if c[2] != core]
         else:
             if ask is None:
                 raise ValueError("instructions differ between tools; pass --from TOOL")
@@ -190,6 +182,19 @@ def propose_instructions(
 
             core = chosen[2]
             chosen_from = chosen[0]
+
+        if replace_differing is not None:
+            should_replace = replace_differing
+        elif ask is not None:
+            ans = ask("replace the other files with the shared text on the next sync? [y/N]: ")
+            should_replace = str(ans).strip().lower() in ("y", "yes")
+        else:
+            should_replace = False
+
+        if should_replace:
+            adopt = [c[0] for c in candidates]
+            skipped = []
+        else:
             adopt = [c[0] for c in candidates if c[2] == core]
             skipped = [c[0] for c in candidates if c[2] != core]
 
@@ -223,6 +228,7 @@ def propose_instructions(
         skipped=skipped,
         messages=messages,
         from_tool=chosen_from,
+        replace_differing=should_replace,
     )
 
 
@@ -678,6 +684,7 @@ def propose(
     detections: Sequence[Detection],
     *,
     from_tool: str | None = None,
+    replace_differing: bool | None = None,
     ask: Callable[[str], str] | None = None,
     env: Env | None = None,
     adapters: Mapping[str, ToolAdapter] | None = None,
@@ -687,6 +694,7 @@ def propose(
     inst_proposal = propose_instructions(
         readings,
         from_tool=from_tool,
+        replace_differing=replace_differing,
         ask=ask,
         env=env,
         adapters=adapters,

@@ -66,7 +66,7 @@ The `all-agents sync` command reconciles the shared source configuration with ev
   - `2`: Differences, conflicts, or unreadable tool configuration files exist.
 - **`all-agents undo`:**
   - `0`: Successful revert or nothing to undo.
-  - `1`: Refusal, error, or unforced drift detected.
+  - `1`: Refusal, error, unforced drift detected, or inverse command was skipped during `undo --force`.
 
 ### 4. Output shape and secret safety
 

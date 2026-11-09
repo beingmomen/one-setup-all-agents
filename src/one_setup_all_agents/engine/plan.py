@@ -124,7 +124,23 @@ def build_plan(
             if kind in _CORE_KINDS and getattr(state, kind.value) is None:
                 continue
             owned = journal.owned_for(env.state_dir, adapter.id, kind.value)
-            ops.extend(_plan_kind(adapter, env, scope, kind, state, owned))
+            planned_ops = _plan_kind(adapter, env, scope, kind, state, owned)
+            for op in planned_ops:
+                if isinstance(op, RunCli):
+                    argv_list = list(op.argv)
+                    inv_list = list(op.inverse_argv)
+                    if mask_args(argv_list) != argv_list or mask_args(inv_list) != inv_list:
+                        ref = next(iter(op.claims + op.releases), None)
+                        ops.append(
+                            Conflict(
+                                tool=ref.tool if ref else adapter.id,
+                                kind=ref.kind if ref else kind,
+                                key=ref.key if ref else mask_text(op.description),
+                                reason="command looks like a secret",
+                            )
+                        )
+                        continue
+                ops.append(op)
             if kind is Kind.SKILLS:
                 for want in adapter.wanted_links(env, scope, state.skills):
                     wanted_links.setdefault(_norm(want.link), []).append(want)

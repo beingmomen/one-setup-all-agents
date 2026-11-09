@@ -9,7 +9,7 @@ What passing the suite against this seam proves, and what it does not, is writte
 docs/decisions/0010-engine-v1.md ("What the contract suite proves"). In short: for the neutral
 example adapters, in a temporary home, on the OS the tests run on, every apply is undone to the
 exact files, folders, links and ownership it started from. It does not prove anything about a
-real tool's own behavior, nor the `undo` COMMAND (Phase 5).
+real tool's own behavior, nor the `undo` command.
 
 `RunCli` ops are never run as real programs. The caller passes `run_cli`, a small in-process fake
 (see `example_adapter.FakeExampleCli`); the engine runs the op's `inverse_argv` through the same
