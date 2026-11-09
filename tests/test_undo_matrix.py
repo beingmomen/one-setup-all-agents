@@ -133,11 +133,11 @@ class UndoMatrixEditFileTests(EngineCase):
         op_id = apply.apply_plan(self.env, Plan([op]), label="edit-symlink", run_cli=self.runner)
         self.assertIsNotNone(op_id)
         self.assertEqual(real_file.read_bytes(), b"real modified\n")
-        self.assertTrue(fsops.is_symlink(link_file))
+        self.assertTrue(link_file.is_symlink())
 
         res = undo_mod.undo(self.env, run_cli=self.runner)
         self.assertIsNotNone(res)
-        self.assertTrue(fsops.is_symlink(link_file))
+        self.assertTrue(link_file.is_symlink())
         self.assertEqual(real_file.read_bytes(), b"real initial\n")
         self.assertEqual(snapshot(self.home, exclude=(self.state,)), snap_before)
 
