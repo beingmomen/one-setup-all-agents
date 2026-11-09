@@ -2,7 +2,7 @@
 
 Status: Proposed
 
-Phase 4 milestone M04 introduces the public `all-agents init` command. Its purpose is to detect installed tools, import existing configurations into the unified source configuration layout (`config.toml`, `mcp.jsonc`, `instructions.md`, `skills/`), adopt matching configurations into the engine ledger, and ensure safety guarantees through snapshots and dry-run reviews.
+Phase 4 introduces the public `all-agents init` command. Its purpose is to detect installed tools, import existing configurations into the unified source configuration layout (`config.toml`, `mcp.jsonc`, `instructions.md`, `skills/`), adopt matching configurations into the engine ledger, and ensure safety guarantees through snapshots and dry-run reviews.
 
 ## Decision
 
@@ -32,11 +32,11 @@ Phase 4 milestone M04 introduces the public `all-agents init` command. Its purpo
      - Disambiguation:
        - If instructions across all installed tools normalize identically, the shared text is written to `instructions.md`, and all tools are adopted.
        - If instructions differ across tools, `--from <tool>` selects the chosen tool's text. In interactive mode without `--from`, the user is prompted to choose by number, displaying short SHA prefixes (e.g. `[1] Claude Code (sha: a1b2c3d4)`) rather than full texts.
-        - Matching files are adopted into the ledger.
-        - Interactive, instructions differ between tools: ask "choose the source tool" once, then ask "replace the other tools' differing files with it?" once. Both answers are kept and reused unchanged by the retry after a snapshot `BackupError`; the retry asks nothing.
-        - `--from <tool>` without `--yes`, interactive: ask only the replace question, once.
-        - `--yes` (with or without `--from`): never replaces a differing file; those files stay unowned and `status` shows them as conflicts; the summary says how to adopt them later (`init` is refused once the source exists, so say: edit the file to match, or delete it, then `sync`).
-        - Non-interactive without `--yes`: as today (asks nothing, writes nothing).
+       - Matching files are adopted into the ledger.
+       - Interactive, instructions differ between tools: ask "choose the source tool" once, then ask "replace the other tools' differing files with it?" once. Both answers are kept and reused unchanged by the retry after a snapshot `BackupError`; the retry asks nothing.
+       - `--from <tool>` without `--yes`, interactive: ask only the replace question, once.
+       - `--yes` (with or without `--from`): never replaces a differing file; those files stay unowned and `status` shows them as conflicts; the summary says how to adopt them later (`init` is refused once the source exists, so say: edit the file to match, or delete it, then `sync`).
+       - Non-interactive without `--yes`: as today (asks nothing, writes nothing).
    - **MCP Servers (`Kind.MCP`):**
      - Unification: Servers from all detected tools are merged into `mcp.jsonc`.
      - Majority rule: If a server definition appears identically across multiple tools, the majority version is selected.

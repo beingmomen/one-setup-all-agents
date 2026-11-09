@@ -2,11 +2,27 @@
 
 The four public commands (`init`, `sync`, `status`, `undo`) are implemented.
 
-Exit codes:
-    0: ok or nothing to do (in sync, no-op, dry run without conflicts, or successful revert)
-    1: refused or failed (error, lock, unforced drift, or inverse command skipped in undo --force)
-    2: usage error (argparse) or `status` differences/conflicts/unreadable config files exist
-    3: `sync` conflicts exist in dry run or unresolved conflicts remain after apply
+Exit codes (ADR 0018 §3):
+
+- General (argparse):
+  - 2: Usage error (unrecognized command or invalid arguments parsed by argparse).
+- all-agents init:
+  - 0: Success, dry-run completion, or no supported tools found.
+  - 1: Refusal or error (already initialised, unknown tool, declined confirmation,
+       engine locked, unfinished operation, or plan/apply failure).
+- all-agents sync:
+  - 0: Success, no-op (already in sync), dry-run without conflicts, or user-declined confirmation.
+  - 1: Refusal, error, lock contention, unfinished operation, invalid flag, or failed apply.
+  - 3: Unresolved conflicts remain in the plan (both during dry-run and after apply).
+- all-agents status:
+  - 0: In sync (no pending operations or differences).
+  - 1: Error (uninitialised, corrupted source config / syntax error, or unreadable
+       ledger / state error).
+  - 2: Differences, conflicts, or unreadable tool configuration files exist.
+- all-agents undo:
+  - 0: Successful revert or nothing to undo.
+  - 1: Refusal, error, unforced drift detected, or inverse command was skipped
+       during `undo --force`.
 
 Behavior of each command (v0.1, global scope only):
 

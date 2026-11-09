@@ -407,8 +407,7 @@ class UndoMatrixRunCliTests(EngineCase):
         self.assertEqual(len(loaded_ops), 1)
         self.assertEqual(loaded_ops[0]["status"], journal.FAILED)
 
-    def test_secret_masking_in_error_text(self):
-        secret = "VERY_CONFIDENTIAL_KEY_12345"
+    def test_runner_exception_text_dropped_in_revert_error(self):
         op = RunCli(
             argv=("tool", "config"),
             inverse_argv=("tool", "config"),
@@ -417,12 +416,15 @@ class UndoMatrixRunCliTests(EngineCase):
         apply.apply_plan(self.env, Plan([op]), label="secret-op", run_cli=self.runner)
 
         def runner_raises(argv: list[str]) -> int:
-            raise RuntimeError(f"server connection failed: {secret}")
+            raise RuntimeError("sensitive internal failure detail: token 12345")
 
         with self.assertRaises(RevertError) as ctx:
             undo_mod.undo(self.env, run_cli=runner_raises)
 
-        self.assertNotIn(secret, str(ctx.exception))
+        err_msg = str(ctx.exception)
+        self.assertIn("could not run (RuntimeError)", err_msg)
+        self.assertNotIn("sensitive internal failure detail", err_msg)
+        self.assertNotIn("12345", err_msg)
 
 
 class UndoMatrixOwnershipTests(EngineCase):

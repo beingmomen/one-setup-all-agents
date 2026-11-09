@@ -47,7 +47,7 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
         try:
             undoable = journal.list_undoable(ctx.env.state_dir)
         except journal.JournalError as exc:
-            warn(ctx, f"cannot read ledger.json ({exc}); restore from backup or reinitialise")
+            warn(ctx, f"{exc}; restore from backup or reinitialise")
             return 1
         if not undoable:
             say(ctx, "No undoable operations.")
@@ -88,7 +88,7 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
         warn(ctx, str(exc))
         return 1
     except journal.JournalError as exc:
-        warn(ctx, f"cannot read ledger.json ({exc}); restore from backup or reinitialise")
+        warn(ctx, f"{exc}; restore from backup or reinitialise")
         return 1
 
     if result is not None and result.warnings:

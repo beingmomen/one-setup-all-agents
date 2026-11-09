@@ -26,7 +26,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from .._core.mask import mask_args, mask_text
-from ..model import Conflict, EditFile, Env, ItemRef, Kind, Link, Plan, RunCli
+from ..model import Conflict, EditFile, Env, ItemRef, Kind, Link, Op, Plan, RunCli
 from . import backup, fsops, journal, links
 from .atomic import atomic_write, resolve_target
 from .errors import (
@@ -37,6 +37,7 @@ from .errors import (
     VerificationError,
 )
 from .lock import engine_lock
+from .plan import runcli_has_secret, secret_conflict_reason
 from .revert import revert_entries, revert_locked
 from .runcli import Runner, default_runner
 
@@ -53,12 +54,6 @@ def _validate(ops: list) -> None:
     """Refuse a plan the engine cannot run, before anything is touched (docs/decisions/0005)."""
     for op in ops:
         if isinstance(op, RunCli):
-            argv_list = list(op.argv)
-            inv_list = list(op.inverse_argv)
-            if mask_args(argv_list) != argv_list or mask_args(inv_list) != inv_list:
-                ref = next(iter(op.claims + op.releases), None)
-                item = ref.key if ref else mask_text(op.description)
-                raise PlanError(f"refusing RunCli for {item}: command looks like a secret")
             if not list(op.argv) or not all(isinstance(a, str) for a in op.argv):
                 raise PlanError(f"RunCli '{mask_text(op.description)}' has no usable argv")
             if not list(op.inverse_argv) or not all(isinstance(a, str) for a in op.inverse_argv):
@@ -268,25 +263,33 @@ def apply_plan(
     failed (the entries already done were reverted; `ApplyError.reverted` says whether that
     finished).
     """
-    for idx, op in enumerate(plan.ops):
-        if isinstance(op, RunCli):
-            argv_list = list(op.argv)
-            inv_list = list(op.inverse_argv)
-            if mask_args(argv_list) != argv_list or mask_args(inv_list) != inv_list:
-                ref = next(iter(op.claims + op.releases), None)
-                tool = ref.tool if ref else "engine"
-                kind = ref.kind if ref else Kind.MCP
-                key = ref.key if ref else mask_text(op.description)
-                item = key
-                plan.ops[idx] = Conflict(
+    new_ops: list[Op] = []
+    secret_refusal: str | None = None
+    for op in plan.ops:
+        if isinstance(op, RunCli) and runcli_has_secret(op):
+            ref = next(iter(op.claims + op.releases), None)
+            tool = ref.tool if ref else "engine"
+            kind = ref.kind if ref else Kind.MCP
+            key = ref.key if ref else mask_text(op.description)
+            item = key
+            new_ops.append(
+                Conflict(
                     tool=tool,
                     kind=kind,
                     key=key,
-                    reason="command looks like a secret",
+                    reason=secret_conflict_reason(item),
                 )
-                raise PlanError(f"refusing RunCli for {item}: command looks like a secret")
+            )
+            if secret_refusal is None:
+                secret_refusal = f"refusing RunCli for {item}: command looks like a secret"
+        else:
+            new_ops.append(op)
 
-    ops = plan.executable
+    if secret_refusal is not None:
+        raise PlanError(secret_refusal)
+
+    working_plan = Plan(new_ops)
+    ops = working_plan.executable
     if not ops and not adopt:
         return None
     if ops:

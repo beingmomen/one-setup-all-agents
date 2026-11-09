@@ -2,7 +2,7 @@
 
 Status: Proposed
 
-Phase 5 milestone M05 implements the core public commands that maintain configurations across tools: `all-agents sync`, `all-agents status`, and `all-agents undo`.
+Phase 5 implements the core public commands that maintain configurations across tools: `all-agents sync`, `all-agents status`, and `all-agents undo`.
 
 ## Decision
 
@@ -56,6 +56,11 @@ The `all-agents sync` command reconciles the shared source configuration with ev
 
 ### 3. Exit codes
 
+- **General (argparse):**
+  - `2`: Usage error (unrecognized command or invalid arguments parsed by argparse).
+- **`all-agents init`:**
+  - `0`: Success, dry-run completion, or no supported tools found.
+  - `1`: Refusal or error (already initialised, unknown tool, declined confirmation, engine locked, unfinished operation, or plan/apply failure).
 - **`all-agents sync`:**
   - `0`: Success, no-op (already in sync), dry-run without conflicts, or user-declined confirmation.
   - `1`: Refusal, error, lock contention, unfinished operation, invalid flag, or failed apply.
@@ -73,6 +78,7 @@ The `all-agents sync` command reconciles the shared source configuration with ev
 - All operations format descriptions cleanly and mask sensitive paths and secrets.
 - Plan rendering groups operations logically, distinguishing created, modified, relinked, and conflicting items.
 - Secret values never appear in preview output, journal summaries, or command logs.
+- `build_plan` already turns any `RunCli` op whose argv or inverse argv changes under `mask_args` into a `Conflict`, so `sync` reports it as an unmanaged conflict (exit 3 in dry run, per §3), and `apply_plan` is the last-line guard against secret-bearing `RunCli` operations (leaving the caller's `Plan` object unmutated).
 
 ### 5. Status JSON schema
 
@@ -188,3 +194,4 @@ The `all-agents sync` command reconciles the shared source configuration with ev
 1. **Selective non-head undo:** Assessing whether `all-agents undo <OP_ID>` should be supported for arbitrary past operations when file change sets do not intersect.
 2. **Interactive visual diff in `status`:** Evaluating an optional `--diff` flag for `all-agents status` to print side-by-side unified diffs of divergent instructions and MCP server configs.
 3. **Configurable retention limit:** Evaluating whether `keep=20` should be configurable via `config.toml` for storage-constrained environments.
+4. **Known false positive on long names:** A single opaque token of 32+ characters with letters and digits is treated as a secret by the argument masking guard; users are advised to shorten or split the argument or move it to an environment variable.

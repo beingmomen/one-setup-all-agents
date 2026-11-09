@@ -91,6 +91,22 @@ def _plan_kind(
     return method[0](env, scope, method[1], owned)
 
 
+def runcli_has_secret(op: RunCli) -> bool:
+    """Return True if op.argv or op.inverse_argv changes under mask_args."""
+    argv_list = list(op.argv)
+    inv_list = list(op.inverse_argv)
+    return mask_args(argv_list) != argv_list or mask_args(inv_list) != inv_list
+
+
+def secret_conflict_reason(item: str) -> str:
+    """Return the Conflict reason for a RunCli argument that looks like a secret."""
+    return (
+        f"an argument of {item} looks like a secret; if it is a secret, "
+        "move it to an environment variable; if it is not (for example a long server name), "
+        "shorten or split it"
+    )
+
+
 def build_plan(
     env: Env,
     adapters: Iterable[ToolAdapter],
@@ -126,20 +142,18 @@ def build_plan(
             owned = journal.owned_for(env.state_dir, adapter.id, kind.value)
             planned_ops = _plan_kind(adapter, env, scope, kind, state, owned)
             for op in planned_ops:
-                if isinstance(op, RunCli):
-                    argv_list = list(op.argv)
-                    inv_list = list(op.inverse_argv)
-                    if mask_args(argv_list) != argv_list or mask_args(inv_list) != inv_list:
-                        ref = next(iter(op.claims + op.releases), None)
-                        ops.append(
-                            Conflict(
-                                tool=ref.tool if ref else adapter.id,
-                                kind=ref.kind if ref else kind,
-                                key=ref.key if ref else mask_text(op.description),
-                                reason="command looks like a secret",
-                            )
+                if isinstance(op, RunCli) and runcli_has_secret(op):
+                    ref = next(iter(op.claims + op.releases), None)
+                    item = ref.key if ref else mask_text(op.description)
+                    ops.append(
+                        Conflict(
+                            tool=ref.tool if ref else adapter.id,
+                            kind=ref.kind if ref else kind,
+                            key=item,
+                            reason=secret_conflict_reason(item),
                         )
-                        continue
+                    )
+                    continue
                 ops.append(op)
             if kind is Kind.SKILLS:
                 for want in adapter.wanted_links(env, scope, state.skills):

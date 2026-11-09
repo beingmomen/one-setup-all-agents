@@ -76,7 +76,7 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
     try:
         plan = build_plan(ctx.env, active_adapters, desired, kinds=kinds)
     except JournalError as exc:
-        warn(ctx, f"cannot read ledger.json ({exc}); restore from backup or reinitialise")
+        warn(ctx, f"{exc}; restore from backup or reinitialise")
         return 1
 
     # (7) Print plan
@@ -127,7 +127,7 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
         warn(ctx, str(exc))
         return 1
     except JournalError as exc:
-        warn(ctx, f"cannot read ledger.json ({exc}); restore from backup or reinitialise")
+        warn(ctx, f"{exc}; restore from backup or reinitialise")
         return 1
 
     if op_id:
@@ -137,7 +137,7 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
     try:
         re_plan = build_plan(ctx.env, active_adapters, desired, kinds=kinds)
     except JournalError as exc:
-        warn(ctx, f"cannot read ledger.json ({exc}); restore from backup or reinitialise")
+        warn(ctx, f"{exc}; restore from backup or reinitialise")
         return 1
     if re_plan.executable:
         warn(ctx, f"warning: {len(re_plan.executable)} change(s) still pending after apply")

@@ -804,6 +804,162 @@ class CmdInitTests(unittest.TestCase):
             self.assertIn("Conflicts (left alone, not changed)", out_sync.getvalue())
             self.assertEqual(paths_a.instructions.read_text(encoding="utf-8"), "# Instructions A\n")
 
+    def test_init_interactive_from_tool_different_instructions_asks_replace_once_choose_never(self):
+        adapter_a = [a for a in all_adapters() if a.id == "claude"][0]
+        adapter_b = [a for a in all_adapters() if a.id == "codex"][0]
+
+        paths_a = adapter_a.paths(self.env, Scope.GLOBAL)
+        paths_a.instructions.parent.mkdir(parents=True, exist_ok=True)
+        paths_a.instructions.write_text("# Instructions A\n", encoding="utf-8")
+
+        paths_b = adapter_b.paths(self.env, Scope.GLOBAL)
+        paths_b.instructions.parent.mkdir(parents=True, exist_ok=True)
+        paths_b.instructions.write_text("# Instructions B\n", encoding="utf-8")
+
+        detection_a = Detection(
+            installed=True, tool=adapter_a.id, label=adapter_a.label, binary=Path("/bin/claude")
+        )
+        detection_b = Detection(
+            installed=True, tool=adapter_b.id, label=adapter_b.label, binary=Path("/bin/codex")
+        )
+        detections = [detection_a, detection_b]
+
+        prompts_asked: list[str] = []
+        answers = {"replace": "y", "Proceed": "y"}
+
+        def counting_read_line(prompt: str) -> str:
+            prompts_asked.append(prompt)
+            for k, v in answers.items():
+                if k.lower() in prompt.lower():
+                    return v
+            return "y"
+
+        ctx = self._ctx(is_interactive=True, read_line=counting_read_line)
+
+        with (
+            patch("one_setup_all_agents.commands.init.detect_all", return_value=detections),
+            patch("one_setup_all_agents.commands.status.detect_all", return_value=detections),
+            patch("one_setup_all_agents.commands.sync.detect_all", return_value=detections),
+        ):
+            code_init = main(["init", "--from", adapter_b.id], context=ctx)
+            self.assertEqual(code_init, 0, f"init failed: {ctx.err.getvalue()}")
+
+            # replace question asked exactly once, choose question never asked
+            self.assertEqual(len(prompts_asked), 2)
+            self.assertTrue(any("replace" in p.lower() for p in prompts_asked))
+            self.assertFalse(any("choose" in p.lower() for p in prompts_asked))
+
+    def test_init_interactive_without_from_different_instructions_replace_no_leaves_conflicts_and_advises_adoption(
+        self,
+    ):
+        import json
+
+        adapter_a = [a for a in all_adapters() if a.id == "claude"][0]
+        adapter_b = [a for a in all_adapters() if a.id == "codex"][0]
+
+        paths_a = adapter_a.paths(self.env, Scope.GLOBAL)
+        paths_a.instructions.parent.mkdir(parents=True, exist_ok=True)
+        paths_a.instructions.write_text("# Instructions A\n", encoding="utf-8")
+
+        paths_b = adapter_b.paths(self.env, Scope.GLOBAL)
+        paths_b.instructions.parent.mkdir(parents=True, exist_ok=True)
+        paths_b.instructions.write_text("# Instructions B\n", encoding="utf-8")
+
+        detection_a = Detection(
+            installed=True, tool=adapter_a.id, label=adapter_a.label, binary=Path("/bin/claude")
+        )
+        detection_b = Detection(
+            installed=True, tool=adapter_b.id, label=adapter_b.label, binary=Path("/bin/codex")
+        )
+        detections = [detection_a, detection_b]
+
+        def interactive_answers(prompt: str) -> str:
+            p_lower = prompt.lower()
+            if "choice:" in p_lower:
+                return "2"  # choose codex
+            if "replace" in p_lower:
+                return "n"  # do not replace tool A's file
+            if "proceed" in p_lower:
+                return "y"
+            return "y"
+
+        ctx = self._ctx(is_interactive=True, read_line=interactive_answers)
+
+        with (
+            patch("one_setup_all_agents.commands.init.detect_all", return_value=detections),
+            patch("one_setup_all_agents.commands.status.detect_all", return_value=detections),
+            patch("one_setup_all_agents.commands.sync.detect_all", return_value=detections),
+        ):
+            code_init = main(["init"], context=ctx)
+            self.assertEqual(code_init, 0, f"init failed: {ctx.err.getvalue()}")
+
+            out_text = ctx.out.getvalue()
+            self.assertIn("differing instructions in", out_text)
+            self.assertIn("left unowned", out_text)
+            self.assertIn("edit the file to match, or delete it, then sync", out_text)
+
+            # status shows conflict for unchosen differing tool (claude)
+            out_status = io.StringIO()
+            err_status = io.StringIO()
+            ctx_status = CommandContext(
+                env=self.env,
+                read_line=lambda p: "",
+                is_interactive=False,
+                out=out_status,
+                err=err_status,
+            )
+            code_status = main(["status", "--json"], context=ctx_status)
+            self.assertEqual(code_status, 2)
+            data = json.loads(out_status.getvalue())
+            tool_a_data = [t for t in data["tools"] if t["id"] == adapter_a.id][0]
+            self.assertEqual(tool_a_data["kinds"]["instructions"]["state"], "conflict")
+
+            # sync leaves differing files alone
+            out_sync = io.StringIO()
+            err_sync = io.StringIO()
+            ctx_sync = CommandContext(
+                env=self.env,
+                read_line=lambda p: "",
+                is_interactive=False,
+                out=out_sync,
+                err=err_sync,
+            )
+            code_sync = main(["sync", "--yes"], context=ctx_sync)
+            self.assertEqual(code_sync, 3)
+            self.assertIn("Conflicts (left alone, not changed)", out_sync.getvalue())
+            self.assertEqual(paths_a.instructions.read_text(encoding="utf-8"), "# Instructions A\n")
+
+    def test_init_yes_without_from_differing_instructions_refuses(self):
+        adapter_a = [a for a in all_adapters() if a.id == "claude"][0]
+        adapter_b = [a for a in all_adapters() if a.id == "codex"][0]
+
+        paths_a = adapter_a.paths(self.env, Scope.GLOBAL)
+        paths_a.instructions.parent.mkdir(parents=True, exist_ok=True)
+        paths_a.instructions.write_text("# Instructions A\n", encoding="utf-8")
+
+        paths_b = adapter_b.paths(self.env, Scope.GLOBAL)
+        paths_b.instructions.parent.mkdir(parents=True, exist_ok=True)
+        paths_b.instructions.write_text("# Instructions B\n", encoding="utf-8")
+
+        detection_a = Detection(
+            installed=True, tool=adapter_a.id, label=adapter_a.label, binary=Path("/bin/claude")
+        )
+        detection_b = Detection(
+            installed=True, tool=adapter_b.id, label=adapter_b.label, binary=Path("/bin/codex")
+        )
+        detections = [detection_a, detection_b]
+
+        ctx = self._ctx(is_interactive=False)
+
+        with (
+            patch("one_setup_all_agents.commands.init.detect_all", return_value=detections),
+            patch("one_setup_all_agents.commands.status.detect_all", return_value=detections),
+            patch("one_setup_all_agents.commands.sync.detect_all", return_value=detections),
+        ):
+            code_init = main(["init", "--yes"], context=ctx)
+            self.assertEqual(code_init, 1)
+            self.assertIn("instructions differ between tools; pass --from TOOL", ctx.err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

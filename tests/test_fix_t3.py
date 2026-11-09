@@ -100,8 +100,25 @@ class FixT3Tests(EngineCase):
         self.assertEqual(len(plan.ops), 1)
         conflict = plan.ops[0]
         self.assertIsInstance(conflict, Conflict)
-        self.assertEqual(conflict.key, "planted-secret-item")
-        self.assertEqual(conflict.reason, "command looks like a secret")
+        self.assertIn("looks like a secret", conflict.reason)
+        self.assertIn("planted-secret-item", conflict.reason)
+
+    def test_runcli_conflict_message_names_item_and_contains_no_argv_value(self):
+        adapter = _SecretAdapter()
+        plan = build_plan(self.env, [adapter], DesiredState(mcp={}))
+        self.assertEqual(len(plan.ops), 1)
+        conflict = plan.ops[0]
+        self.assertIsInstance(conflict, Conflict)
+        expected_msg = (
+            "an argument of planted-secret-item looks like a secret; "
+            "if it is a secret, move it to an environment variable; "
+            "if it is not (for example a long server name), shorten or split it"
+        )
+        self.assertEqual(conflict.reason, expected_msg)
+        self.assertIn("planted-secret-item", conflict.reason)
+        for arg in adapter.plan_mcp(self.env, Scope.GLOBAL, {}, frozenset())[0].argv:
+            if arg not in ("tool", "add-server", "planted-secret-item"):
+                self.assertNotIn(arg, conflict.reason)
 
     def test_runcli_planted_secret_apply_plan_refuses_and_stores_no_secret(self):
         secret = "ghp_11111111111111111111"
@@ -120,10 +137,35 @@ class FixT3Tests(EngineCase):
             "refusing RunCli for planted-secret-item: command looks like a secret", err_msg
         )
         self.assertNotIn(secret, err_msg)
-        self.assertIsInstance(plan.ops[0], Conflict)
-        self.assertEqual(plan.ops[0].key, "planted-secret-item")
+        self.assertIsInstance(plan.ops[0], RunCli)
+        self.assertIs(plan.ops[0], op)
 
         # Verify no file in state_dir contains the secret
+        if self.env.state_dir.exists():
+            for p in self.env.state_dir.rglob("*"):
+                if p.is_file():
+                    self.assertNotIn(secret.encode("utf-8"), p.read_bytes())
+
+    def test_runcli_planted_secret_apply_plan_tuple_not_mutated(self):
+        secret = "ghp_11111111111111111111"
+        op = RunCli(
+            argv=["tool", "add-server", "planted-secret-item", "--token", secret],
+            inverse_argv=["tool", "remove-server", "planted-secret-item"],
+            description="add planted-secret-item with token",
+            claims=(ItemRef("secret-tool", Kind.MCP, "planted-secret-item"),),
+        )
+        plan = Plan((op,))
+        with self.assertRaises(PlanError) as ctx:
+            apply_plan(self.env, plan, label="test-secret")
+
+        err_msg = str(ctx.exception)
+        self.assertIn(
+            "refusing RunCli for planted-secret-item: command looks like a secret", err_msg
+        )
+        self.assertNotIn(secret, err_msg)
+        self.assertIsInstance(plan.ops[0], RunCli)
+        self.assertIs(plan.ops[0], op)
+
         if self.env.state_dir.exists():
             for p in self.env.state_dir.rglob("*"):
                 if p.is_file():
@@ -214,8 +256,11 @@ class FixT3Tests(EngineCase):
         code = main(["sync", "--yes"], context=ctx)
         self.assertEqual(code, 1)
         err_val = err.getvalue()
-        self.assertIn("ledger.json", err_val)
-        self.assertIn("restore from backup or reinitialise", err_val)
+        self.assertIn(
+            "cannot read ledger.json: JSONDecodeError; restore from backup or reinitialise",
+            err_val,
+        )
+        self.assertNotIn("cannot read ledger.json (cannot read ledger.json", err_val)
         self.assertNotIn("Traceback", err_val)
         self.assertNotIn("Traceback", out.getvalue())
         self.assertEqual(
@@ -232,8 +277,11 @@ class FixT3Tests(EngineCase):
         code = main(["undo"], context=ctx)
         self.assertEqual(code, 1)
         err_val = err.getvalue()
-        self.assertIn("ledger.json", err_val)
-        self.assertIn("restore from backup or reinitialise", err_val)
+        self.assertIn(
+            "cannot read ledger.json: JSONDecodeError; restore from backup or reinitialise",
+            err_val,
+        )
+        self.assertNotIn("cannot read ledger.json (cannot read ledger.json", err_val)
         self.assertNotIn("Traceback", err_val)
         self.assertNotIn("Traceback", out.getvalue())
         self.assertEqual(
@@ -250,8 +298,11 @@ class FixT3Tests(EngineCase):
         code = main(["undo", "--list"], context=ctx)
         self.assertEqual(code, 1)
         err_val = err.getvalue()
-        self.assertIn("ledger.json", err_val)
-        self.assertIn("restore from backup or reinitialise", err_val)
+        self.assertIn(
+            "cannot read ledger.json: JSONDecodeError; restore from backup or reinitialise",
+            err_val,
+        )
+        self.assertNotIn("cannot read ledger.json (cannot read ledger.json", err_val)
         self.assertNotIn("Traceback", err_val)
         self.assertNotIn("Traceback", out.getvalue())
         self.assertEqual(

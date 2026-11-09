@@ -37,10 +37,10 @@ pipx install one-setup-all-agents    # then run: all-agents --help
 
 | Tool | Adapter id | v0.1 (global scope) | Windows | Linux | macOS | Notes |
 |---|---|---|---|---|---|---|
-| Claude Code | `claude` | implemented, not yet tried against real tools: M06 pending | not yet verified | unverified | unverified | MCP is written through the tool's own CLI, because running sessions also write its config file. |
-| Codex | `codex` | implemented, not yet tried against real tools: M06 pending | not yet verified | unverified | unverified | Only a managed region of its TOML config is edited. |
-| OpenCode | `opencode` | implemented, not yet tried against real tools: M06 pending | not yet verified | unverified | unverified | First adapter to be ported (simplest). |
-| Antigravity (`agy`) | `agy` | implemented, not yet tried against real tools: M06 pending | not yet verified | unverified | unverified | Does not follow Windows junctions, so each skill is listed in its `skills.json` manifest by the path of the source folder. Has no variable reference for secrets, so an http server with headers is not written. |
+| Claude Code | `claude` | implemented, not yet tested against the real tools | not yet verified | unverified | unverified | MCP is written through the tool's own CLI, because running sessions also write its config file. |
+| Codex | `codex` | implemented, not yet tested against the real tools | not yet verified | unverified | unverified | Only a managed region of its TOML config is edited. |
+| OpenCode | `opencode` | implemented, not yet tested against the real tools | not yet verified | unverified | unverified | First adapter to be ported (simplest). |
+| Antigravity (`agy`) | `agy` | implemented, not yet tested against the real tools | not yet verified | unverified | unverified | Does not follow Windows junctions, so each skill is listed in its `skills.json` manifest by the path of the source folder. Has no variable reference for secrets, so an http server with headers is not written. |
 
 The adapters and engine are implemented, but real tool verification is in progress, so no cell says "verified" yet. When the adapters are verified against real tools, verification follows this plan: Windows and Linux (through WSL) are checked with the real tools; macOS is checked only through CI runners for what runs without a login (tests against fixtures). Anything not checked stays marked "unverified" here.
 

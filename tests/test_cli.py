@@ -3,11 +3,14 @@
 import contextlib
 import io
 import os
+import re
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 
 import _bootstrap  # noqa: F401  (adds src/ to sys.path)
+import one_setup_all_agents.cli as cli_mod
 from one_setup_all_agents import __version__
 from one_setup_all_agents.cli import build_parser, main
 
@@ -98,6 +101,36 @@ class ModuleEntryPointTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         for command in COMMANDS:
             self.assertIn(command, result.stdout)
+
+
+class CliExitCodesDocTests(unittest.TestCase):
+    def test_cli_docstring_exit_codes_match_adr_0018_section_3(self):
+        doc = cli_mod.__doc__ or ""
+        adr_path = (
+            Path(__file__).resolve().parent.parent
+            / "docs"
+            / "decisions"
+            / "0018-commands-sync-status-undo.md"
+        )
+        adr_text = adr_path.read_text(encoding="utf-8")
+
+        match = re.search(r"### 3\. Exit codes(.*?)(?:### 4|\Z)", adr_text, re.DOTALL)
+        self.assertIsNotNone(match, "ADR 0018 section 3 not found")
+        adr_section_3 = match.group(1)
+
+        commands_in_doc = re.findall(
+            r"- (General \(argparse\)|all-agents \w+):\s*\n((?:\s+- \d+: .*\n)+)", doc
+        )
+        self.assertEqual(len(commands_in_doc), 5)
+
+        for cmd, codes_block in commands_in_doc:
+            self.assertIn(cmd, adr_section_3, f"Command {cmd} missing in ADR 0018 §3")
+            codes = re.findall(r"- (\d+):", codes_block)
+            self.assertTrue(len(codes) > 0)
+            for code in codes:
+                self.assertIn(
+                    f"`{code}`:", adr_section_3, f"Code {code} for {cmd} missing in ADR 0018 §3"
+                )
 
 
 if __name__ == "__main__":
