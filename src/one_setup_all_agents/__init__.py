@@ -16,4 +16,4 @@ Layout:
     adapters/    one module per tool; adapters detect, read and plan, never write
 """
 
-__version__ = "0.0.0.dev0"
+__version__ = "0.1.0"
