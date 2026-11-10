@@ -272,6 +272,12 @@ class CmdInitTests(unittest.TestCase):
         )
         env["HOME"] = str(self.home)
         env["USERPROFILE"] = str(self.home)
+        env["APPDATA"] = str(self.home / "AppData" / "Roaming")
+        env["LOCALAPPDATA"] = str(self.home / "AppData" / "Local")
+        env["XDG_CONFIG_HOME"] = str(self.home / ".config")
+        env["XDG_STATE_HOME"] = str(self.home / ".local" / "state")
+        env.pop("ALL_AGENTS_CONFIG_DIR", None)
+        env.pop("ALL_AGENTS_STATE_DIR", None)
         result = subprocess.run(
             [sys.executable, "-m", "one_setup_all_agents", "init", "--dry-run"],
             env=env,

@@ -171,6 +171,13 @@ The `all-agents sync` command reconciles the shared source configuration with ev
   - Active revert protection: Any operation still referenced by a pending revert or open undo is never pruned.
   - Error visibility: Pruning errors or warnings (e.g. unmanaged files in backup folders) are surfaced to stderr, never swallowed silently.
 
+### 8. Quiet mode for hooks (`all-agents status --quiet`)
+
+In hook environments (such as editor session start hooks), status checks must not disrupt sessions by failing with non-zero exit codes when drift occurs. Passing `--quiet`:
+- When in sync: suppresses all standard output and standard error, exiting 0.
+- When differences/conflicts/drift occur: prints a single summary line to standard error (e.g., `drift detected (<tools>): run 'all-agents sync'`), and exits 0.
+- Internal errors (uninitialised configuration or ledger corruption) exit 1 with an error message to standard error.
+
 ## Reason
 
 - Clear, structured JSON output enables robust tooling and CI automation without parsing terminal color codes.

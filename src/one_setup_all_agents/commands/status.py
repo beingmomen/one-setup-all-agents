@@ -52,6 +52,7 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
     """Run the status command: inspect whether tools match shared source config."""
     versions = bool(getattr(args, "versions", False))
     is_json = bool(getattr(args, "json", False))
+    quiet = bool(getattr(args, "quiet", False))
 
     # 1. Check if initialised
     config_file = ctx.env.config_dir / SOURCE_CONFIG_NAME
@@ -64,6 +65,8 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
                 "undoable_operations": 0,
             }
             say(ctx, json.dumps(data, indent=2))
+        elif quiet:
+            warn(ctx, "not initialised: run `all-agents init`")
         else:
             detections = detect_all(ctx.env, versions=versions, probe=ctx.probe)
             say(ctx, render_detections(detections, ctx.env))
@@ -247,6 +250,28 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
                 warn(ctx, str(exc))
             return 1
 
+    has_issues = any(
+        kd["state"] in ("differs", "conflict", "unreadable")
+        for td in tools_data
+        for kd in td["kinds"].values()
+    )
+
+    if quiet:
+        if has_issues:
+            drifting = [
+                td["id"]
+                for td in tools_data
+                if any(
+                    kd["state"] in ("differs", "conflict", "unreadable")
+                    for kd in td["kinds"].values()
+                )
+            ]
+            warn(
+                ctx,
+                f"drift detected ({', '.join(drifting)}): run `all-agents sync`",
+            )
+        return 0
+
     if is_json:
         data = {
             "schema": 1,
@@ -258,9 +283,4 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
     else:
         say(ctx, _render_human_status(tools_data, undoable_count))
 
-    has_issues = any(
-        kd["state"] in ("differs", "conflict", "unreadable")
-        for td in tools_data
-        for kd in td["kinds"].values()
-    )
     return 2 if has_issues else 0

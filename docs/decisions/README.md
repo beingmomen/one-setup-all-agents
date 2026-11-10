@@ -22,3 +22,7 @@ Short ADRs. Each one gives the decision, the reason and the open points. Status 
 | [0016](0016-unknown-formats-are-refused.md) | Unknown formats are refused | Proposed |
 | [0017](0017-init-import-adoption-snapshot.md) | Init, import, adoption, and safety snapshots | Proposed |
 | [0018](0018-commands-sync-status-undo.md) | Commands v1 (sync, status, undo) | Proposed |
+| [0019](0019-verification-results-v0.1.md) | Verification results v0.1 | Proposed |
+| [0020](0020-release-and-publishing.md) | Release and publishing | Proposed |
+
+

@@ -396,5 +396,34 @@ class CmdStatusTests(EngineCase):
         self.assertIn("cannot read ledger.json", data["error"])
 
 
+    def test_status_quiet_in_sync_prints_nothing_and_exits_zero(self):
+        self._init_and_sync()
+        ctx, out, err = self._ctx()
+        code = main(["status", "--quiet"], context=ctx)
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(err.getvalue(), "")
+
+    def test_status_quiet_on_drift_prints_single_line_to_stderr_and_exits_zero(self):
+        self._init_and_sync()
+        # Create drift by modifying instructions in source config
+        (self.env.config_dir / INSTRUCTIONS_NAME).write_text("# Drifting content\n", encoding="utf-8")
+        ctx, out, err = self._ctx()
+        code = main(["status", "--quiet"], context=ctx)
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), "")
+        err_lines = err.getvalue().strip().splitlines()
+        self.assertEqual(len(err_lines), 1)
+        self.assertIn("drift detected", err_lines[0])
+        self.assertNotIn("Traceback", err.getvalue())
+
+    def test_status_quiet_when_uninitialised_exits_one(self):
+        ctx, out, err = self._ctx()
+        code = main(["status", "--quiet"], context=ctx)
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("not initialised: run `all-agents init`", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

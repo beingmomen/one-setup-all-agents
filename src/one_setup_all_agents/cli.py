@@ -157,7 +157,13 @@ def build_parser() -> argparse.ArgumentParser:
     adv_status = status.add_argument_group("advanced options")
     adv_status.add_argument("--json", action="store_true", help="machine-readable output")
     adv_status.add_argument("--versions", action="store_true", help="probe tool versions (slower)")
+    adv_status.add_argument(
+        "--quiet",
+        action="store_true",
+        help="print nothing when in sync, one summary line to stderr on drift, exit 0",
+    )
     status.set_defaults(func=_cmd_status)
+
 
     undo = sub.add_parser(
         "undo",
