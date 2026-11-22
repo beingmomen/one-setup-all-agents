@@ -7,7 +7,7 @@
 `mcp.jsonc` sits in your shared source config directory alongside `config.toml` (see [Config Locations](../README.md#config-locations) and [ADR 0002](decisions/0002-config-and-state-locations.md)):
 
 - **Windows:** `%APPDATA%\one-setup-all-agents\mcp.jsonc` (fallback `~\AppData\Roaming\one-setup-all-agents\mcp.jsonc`)
-- **Linux:** `$XDG_CONFIG_HOME/one-setup-all-agents/mcp.jsonc` (default `~/.config/one-setup-all-agents/mcp.jsonc`)
+- **Linux:** `$XDG_CONFIG_HOME/one-setup-all-agents/mcp.jsonc` when `XDG_CONFIG_HOME` is set to an absolute path (a relative value is ignored), else `~/.config/one-setup-all-agents/mcp.jsonc`
 - **macOS:** `~/.config/one-setup-all-agents/mcp.jsonc` (same as Linux; uses `$XDG_CONFIG_HOME` when set to an absolute path)
 
 You can override the source directory on any OS with `--config-dir DIR` or the `ALL_AGENTS_CONFIG_DIR` environment variable (`--config-dir` takes precedence over the environment variable).
@@ -38,7 +38,7 @@ Every entry under `servers` may use only the following fields:
 | `env` | object (`string -> string`) | `stdio` only | Non-secret literal environment variables to set for the server. |
 | `env_vars` | list of strings | `stdio` only | Names of environment variables to pass through from the host environment under the same name. Each entry must match `^[A-Za-z_][A-Za-z0-9_]*$`. |
 | `headers` | object (`string -> string`) | `http` only | HTTP headers whose values reference an environment variable: `${VAR_NAME}` or `<Scheme> ${VAR_NAME}` (for example `Bearer ${EXAMPLE_TOKEN}`). |
-| `startup_timeout_sec` | positive finite number | both | Server startup timeout in seconds (booleans are rejected). Prefer whole integers: the neutral model and Codex reads keep whole seconds. |
+| `startup_timeout_sec` | positive finite number | both | Server startup timeout in seconds (booleans are rejected). Prefer whole seconds: a fractional value is written to Codex as is, but reading a Codex config back (for example during `init`) keeps whole seconds only. |
 | `auth` | `"oauth"`, `"none"`, or `null` | both | Documentation-only marker. Not written to any tool. |
 | `enabled` | boolean | both | Whether the server is enabled (default `true`). |
 | `tools` | list of strings | both | Target adapter IDs (`"opencode"`, `"claude"`, `"codex"`, `"agy"`). When omitted, the server targets every enabled tool. |
@@ -101,7 +101,7 @@ Transport is inferred from whether `command` or `url` is present (there is no `t
 
 ## Secrets and Variable References
 
-`mcp.jsonc` and every value `all-agents` itself adds to a tool config hold environment-variable names only (the rest of a tool config, including a literal value you wrote there yourself, is kept as it is), and plan, status, and command output is masked. However, the safety snapshot taken by `all-agents init` and the per-operation backups keep exact byte-for-byte copies of your existing tool config files, so a credential already written literally in a tool config is also in those copies. Those copies are never printed and are stored in the private state directory (`0700` directories and `0600` files on POSIX; see [Config Locations](../README.md#config-locations) and [ADR 0002](decisions/0002-config-and-state-locations.md)). Every credential in `mcp.jsonc` is referenced by environment-variable name only:
+`mcp.jsonc` and every value `all-agents` itself adds to a tool config hold environment-variable names only (servers `all-agents` does not own, and keys it does not manage, are kept as they are; a managed key of a server it owns, such as `env`, is replaced to match `mcp.jsonc`), and plan, status, and command output is masked. However, the safety snapshot taken by `all-agents init` and the per-operation backups keep exact byte-for-byte copies of your existing tool config files, so a credential already written literally in a tool config is also in those copies. Those copies are never printed and are stored in the private state directory (`0700` directories and `0600` files on POSIX; see [Config Locations](../README.md#config-locations) and [ADR 0002](decisions/0002-config-and-state-locations.md)). Every credential in `mcp.jsonc` is referenced by environment-variable name only:
 
 - **HTTP headers (`headers`):** Write `"${VAR_NAME}"` for a raw header value or `"<Scheme> ${VAR_NAME}"` for a prefixed value such as `"Authorization": "Bearer ${EXAMPLE_TOKEN}"`.
 - **Secret environment variables (`env_vars`):** List variable names in `env_vars` (for example `["EXAMPLE_API_KEY"]`). Claude Code, OpenCode, and Codex pass that variable from their environment to the MCP server under the **same name**. Antigravity does not write `env_vars` to `mcp_config.json` and reports it as `Unsupported` (relying on `agy` passing its own environment to the server, which is unverified).
@@ -206,7 +206,7 @@ The JSON payload passed for the two example servers (resulting entries under `"m
 
 ### OpenCode (`opencode`)
 
-Edited as text inside `~/.config/opencode/opencode.jsonc` (or `$XDG_CONFIG_HOME/opencode/opencode.jsonc`), preserving comments and unrelated keys. If `opencode.json` exists and `opencode.jsonc` does not, `opencode.json` is edited instead. New entries use the v2 layout under `"mcp": {"servers": {...}}` (an existing v1 file with `"mcp": {"<name>": {...}}` is edited in place, using `"enabled": false` instead of `"disabled": true`).
+Edited as text inside `~/.config/opencode/opencode.jsonc` (or `$XDG_CONFIG_HOME/opencode/opencode.jsonc` when `XDG_CONFIG_HOME` is an absolute path), preserving comments and unrelated keys. If `opencode.json` exists and `opencode.jsonc` does not, `opencode.json` is edited instead. New entries use the v2 layout under `"mcp": {"servers": {...}}` (an existing v1 file with `"mcp": {"<name>": {...}}` is edited in place, using `"enabled": false` instead of `"disabled": true`).
 
 ```jsonc
 {
@@ -338,7 +338,7 @@ See the individual reports in [`docs/verification/`](verification/) and the [Sup
   - `startup_timeout_sec` is not stored (`Unsupported`).
 - **All tools:**
   - `auth` is documentation-only and is not written to any tool.
-  - Header schemes have a regex mismatch between the source loader and the adapters: the source loader (`config_source.py`) accepts `[A-Za-z0-9_-]+`, so a scheme containing `.` is refused by the loader (`SourceError`) while a scheme starting with a digit passes; Claude Code and OpenCode require `^[A-Za-z][A-Za-z0-9._-]*$`, so a scheme starting with a digit is reported as `Unsupported` by those adapters. (Codex accepts only `Bearer` on `Authorization`.)
+  - Header schemes have a regex mismatch between the source loader and the adapters: the source loader (`config_source.py`) accepts `[A-Za-z0-9_-]+`, so a scheme containing `.` is refused by the loader (`SourceError`) while a scheme that does not start with a letter (a digit, `_` or `-`) passes; Claude Code and OpenCode require `^[A-Za-z][A-Za-z0-9._-]*$`, so such a scheme is reported as `Unsupported` by those adapters. (Codex accepts only `Bearer` on `Authorization`.)
 
 ### How `Unsupported` and `Conflict` are reported
 
@@ -346,7 +346,7 @@ See the individual reports in [`docs/verification/`](verification/) and the [Sup
 
 - **`Unsupported` (permanent tool limit):**
   - In `all-agents sync --dry-run` and `all-agents sync`, gaps are counted in the summary line (`Plan: ... N unsupported`) and listed under `Not supported by the tool (shown so the gap is visible):`. `Unsupported` entries do **not** cause `sync` to fail (exit code stays `0` when there are no conflicts or errors).
-  - In `all-agents status`, once a tool's `mcp` kind has no reader errors, conflicts, or pending changes, it shows `mcp: unsupported (reasons: ...)`. The tool's overall status still reports `in sync` and `status` exits `0`, because an `Unsupported` entry is a permanent capability gap rather than drift.
+  - In `all-agents status`, once a tool's `mcp` kind has no reader errors, conflicts, or pending changes, it shows `mcp: unsupported (reasons: ...)`. An `Unsupported` entry is a permanent capability gap rather than drift, so it does not change the tool's overall status: a tool whose other kinds (instructions, skills) are in sync still reports `in sync`, and `status` exits `0` when no tool shows a conflict, a pending change or an unreadable config.
 - **`Conflict` (something in the way):**
   - Reported when a server with the same name already exists, was not created or adopted by `all-agents`, and differs from what would be written (an identical unowned entry is left alone with no conflict), when a tool config file cannot be parsed, or when the `claude` CLI is missing for a pending Claude Code MCP change.
   - Conflicting items are left untouched. They appear under `Conflicts (left alone, not changed):` in `sync` (exit code `3`) and as `mcp: conflict (...)` in `status` (exit code `2`). A tool config that cannot be read or parsed is a `Conflict` in the `sync` plan, but `status` checks the reader first and shows it as `mcp: unreadable (...)` (also exit code `2`).
@@ -441,7 +441,7 @@ Run a dry run focused on MCP servers (you can also run `all-agents sync --dry-ru
 all-agents sync --only mcp --dry-run
 ```
 
-With OpenCode already in sync and Claude Code, Codex, and Antigravity detected, the plan looks like this (your home directory is shortened to `~` here, and `claude` stands for the full path of the detected Claude Code binary; path separators match your OS):
+With OpenCode already in sync and Claude Code, Codex, and Antigravity detected, the plan looks like this (`all-agents` prints your home directory as `~`; `claude` appears by its bare name when it is found on `PATH`, or by its full path when it comes from `ALL_AGENTS_CLAUDE_BIN` or a known install folder; path separators match your OS):
 
 ```text
 Plan: 4 change(s), 0 conflict(s), 1 unsupported
@@ -474,4 +474,4 @@ all-agents sync --only mcp
 
 `all-agents` prints the same plan, asks `Apply 4 change(s)? [y/N]:`, applies the changes atomically with pre-write backups and journal entries, prints `applied operation <op-id>`, and re-plans to verify no pending changes remain.
 
-Afterward, running `all-agents status` exits `0`: OpenCode, Claude Code, and Codex report `mcp: in sync`, while Antigravity reports overall `in sync` with `mcp: unsupported` repeating the two documented gaps. If you want to roll everything back (including removing the Claude Code servers via `claude mcp remove`), run `all-agents undo`.
+Afterward, provided instructions and skills are also in sync, running `all-agents status` exits `0`: OpenCode, Claude Code, and Codex report `mcp: in sync`, while Antigravity reports overall `in sync` with `mcp: unsupported` repeating the two documented gaps. If you want to roll everything back (including removing the Claude Code servers via `claude mcp remove`), run `all-agents undo`.
