@@ -13,7 +13,7 @@ If you use more than one AI coding agent, you keep the same things in several pl
 - **Write once.** One source config; every detected tool gets the same instructions, MCP servers and skills.
 - **Safe by default.** `sync` shows a dry run first. Every write is atomic, backed up and recorded.
 - **Undo with one command.** `all-agents undo` reverses the last change, from one journal that covers every kind of change.
-- **Nothing to trust blindly.** Zero runtime dependencies (Python standard library only). Secrets are referenced by environment-variable name; their values are never read, printed or stored.
+- **Nothing to trust blindly.** Zero runtime dependencies (Python standard library only). Secrets are referenced by environment-variable name; their values are never read from your environment, printed, or written by `all-agents` into your configs (backups keep exact copies of the files they protect).
 
 ## Quick Start (5 minutes)
 
@@ -119,9 +119,11 @@ Overrides: Setting `ALL_AGENTS_CONFIG_DIR` or `ALL_AGENTS_STATE_DIR` overrides t
 
 `one-setup-all-agents` operates under a zero-secret-exposure principle:
 
-- **Variable References Only:** Secrets (API keys, tokens, auth headers) are referenced strictly by environment-variable name (e.g. `${GITHUB_TOKEN}` or `Authorization: Bearer <NAME>`).
-- **No Secret Values:** Cleartext secret values are never requested, read from your environment, printed to stdout/stderr, written to disk, or stored in journals or backups.
+- **Variable References Only:** Secrets (API keys, tokens, auth headers) are referenced strictly by environment-variable name (e.g. `${GITHUB_TOKEN}` or `Authorization: Bearer ${NAME}`).
+- **No Secret Values:** Cleartext secret values are never requested, read from your environment, printed to stdout/stderr, or added by `all-agents` to `mcp.jsonc` or tool configs (servers it does not own, and keys it does not manage, are kept as they are); however, `init` snapshots and operation backups copy existing tool config files byte for byte into the private state directory (`0700` dirs, `0600` files on POSIX), so pre-existing literal secrets in those files stay in the backups (see [Secrets and Variable References](docs/mcp.md#secrets-and-variable-references)).
 - **CLI Guard:** If an adapter must run an external CLI (such as `claude mcp add-json`), arguments are scanned to ensure no secret values are passed on the process command line.
+
+For the full `mcp.jsonc` schema, variable reference rules, per-tool translations, and limits, see the [MCP servers guide](docs/mcp.md).
 
 ## Supported tools
 
