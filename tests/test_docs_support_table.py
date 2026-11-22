@@ -52,7 +52,7 @@ class DocsSupportTableTests(unittest.TestCase):
         for line in table_lines[2:]:
             cols = [c.strip() for c in line.strip("|").split("|")]
             self.assertEqual(len(cols), len(headers), f"Malformed table row: {line}")
-            rows.append(dict(zip(headers, cols)))
+            rows.append(dict(zip(headers, cols, strict=True)))
         return rows
 
     def test_support_table_columns_and_tools(self) -> None:
