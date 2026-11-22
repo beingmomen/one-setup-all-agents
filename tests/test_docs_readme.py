@@ -12,10 +12,14 @@ try:
 except ImportError:
     from tests import _bootstrap  # noqa: F401
 
+from tests.test_docs_support_table import (
+    LINK_PATTERN,
+    STATIC_VOCAB,
+    VALID_V01_VOCAB,
+    VERIFIED_PATTERN,
+)
+
 from one_setup_all_agents import cli
-
-from tests.test_docs_support_table import LINK_PATTERN, STATIC_VOCAB, VALID_V01_VOCAB, VERIFIED_PATTERN
-
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 README_PATH = REPO_ROOT / "README.md"
@@ -86,7 +90,7 @@ class DocsReadmeTests(unittest.TestCase):
         headers = [c.strip() for c in table_lines[0].strip("|").split("|")]
         for line in table_lines[2:]:
             cols = [c.strip() for c in line.strip("|").split("|")]
-            row = dict(zip(headers, cols))
+            row = dict(zip(headers, cols, strict=True))
             v01 = row["v0.1 (global scope)"]
             self.assertIn(v01, VALID_V01_VOCAB)
 

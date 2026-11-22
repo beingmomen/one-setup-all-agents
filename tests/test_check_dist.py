@@ -4,6 +4,7 @@
 """Unit test validating scripts/check_dist.py behavior against valid and invalid distribution artifacts."""
 
 import io
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -13,7 +14,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CHECK_DIST_PATH = REPO_ROOT / "scripts" / "check_dist.py"
 
-import sys
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 from check_dist import check_dist
 
