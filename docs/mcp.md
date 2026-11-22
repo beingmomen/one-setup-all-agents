@@ -101,10 +101,10 @@ Transport is inferred from whether `command` or `url` is present (there is no `t
 
 ## Secrets and Variable References
 
-`all-agents` never reads, prints, stores, or writes secret values. Every credential in `mcp.jsonc` is referenced by environment-variable name only:
+`mcp.jsonc` and everything `all-agents` writes into tool configs hold environment-variable names only, and plan, status, and command output is masked. However, the safety snapshot taken by `all-agents init` and the per-operation backups keep exact byte-for-byte copies of your existing tool config files, so a credential already written literally in a tool config is also in those copies. Those copies are never printed and are stored in the private state directory (`0700` directories and `0600` files on POSIX; see [Config Locations](../README.md#config-locations) and [ADR 0002](decisions/0002-config-and-state-locations.md)). Every credential in `mcp.jsonc` is referenced by environment-variable name only:
 
 - **HTTP headers (`headers`):** Write `"${VAR_NAME}"` for a raw header value or `"<Scheme> ${VAR_NAME}"` for a prefixed value such as `"Authorization": "Bearer ${EXAMPLE_TOKEN}"`.
-- **Secret environment variables (`env_vars`):** List variable names in `env_vars` (for example `["EXAMPLE_API_KEY"]`). Each tool passes that variable from its environment to the MCP server under the **same name**.
+- **Secret environment variables (`env_vars`):** List variable names in `env_vars` (for example `["EXAMPLE_API_KEY"]`). Claude Code, OpenCode, and Codex pass that variable from their environment to the MCP server under the **same name**. Antigravity does not write `env_vars` to `mcp_config.json` and reports it as `Unsupported` (relying on `agy` passing its own environment to the server, which is unverified).
 - **Non-secret literals (`env`):** Use `env` only for plain configuration such as `"LOG_LEVEL": "info"` or `"MODE": "test"`. Anything that looks like a secret is refused by the loader.
 
 > **Important:** Mapping an environment variable to a different name (for example setting `API_KEY` from `${MY_TOKEN}`) is **not supported today**. `env_vars` always passes the variable under its own name, and putting `${MY_TOKEN}` inside `env` is not portable across tools (Codex does not expand variable syntax inside `env`, Claude Code refuses `${` in literal `env` entries, and OpenCode does not expand `${...}`).
@@ -117,7 +117,11 @@ Because credentials come from environment variables at runtime, the tool process
 
 When `all-agents init` reads your existing tool configs:
 
-- Adapter readers never copy literal secret `env` values or literal HTTP headers into the neutral model. Instead, `init` prints a warning naming the field (never the value), adds a `// Note:` comment above that server in `mcp.jsonc`, and leaves that server **unowned** for that tool so the next `all-agents sync` reports a `Conflict` rather than stripping your live credentials.
+- Adapter readers never copy secret-looking `env` literals or literal HTTP headers into the neutral model. Instead, `init` prints a warning naming the field (never the value), adds a `// Note:` comment above that server in `mcp.jsonc`, and leaves that server **unowned** (not adopted) for that tool.
+- `all-agents` never edits or removes an unowned entry on `all-agents sync`:
+  - If the unowned entry already matches the fields the adapter compares, `sync` plans no change and no conflict, leaving the entry as is (so the literal credential stays in that tool's config until you move it to an environment variable yourself).
+  - If a change would be needed on the compared fields, `sync` reports a `Conflict` and leaves the entry untouched.
+  - Because secret-looking `env` entries are dropped from `mcp.jsonc` while `env`/`environment` is always compared, a dropped `env` secret triggers a `Conflict` in all four tools. For a dropped literal HTTP header (when `mcp.jsonc` has no `headers`), Claude Code always compares `headers` and reports a `Conflict`, whereas OpenCode (which compares `headers` only when present in the source), Codex (which ignores literal `http_headers` during comparison), and Antigravity (which does not read or compare `headers`) see a match and leave the entry alone without a conflict.
 - If a secret-looking literal appears inside `command`, `url`, `cwd`, or `args`, `init` skips importing that server altogether and prints a warning naming the field.
 
 ## Per-Tool Translation
@@ -234,7 +238,7 @@ Edited as text inside `~/.config/opencode/opencode.jsonc` (or `$XDG_CONFIG_HOME/
 
 ### Codex (`codex`)
 
-Edited as text inside `~/.codex/config.toml` (or `$CODEX_HOME/config.toml` when `CODEX_HOME` is an absolute path). Added or changed `[mcp_servers.<name>]` tables are written inside a managed region at the end of the file (`# >>> one-setup-all-agents >>>` ... `# <<< one-setup-all-agents <<<`); everything outside the managed region stays intact.
+Edited as text inside `~/.codex/config.toml` (or `$CODEX_HOME/config.toml` when `CODEX_HOME` is an absolute path). Added or changed owned `[mcp_servers.<name>]` tables (and their `[mcp_servers.<name>.*]` sub-tables) are written inside a managed region (`# >>> one-setup-all-agents >>>` ... `# <<< one-setup-all-agents <<<`, placed at the end of the file when first created). If an owned `[mcp_servers.<name>]` table currently outside the region is modified or removed, its blocks and immediately preceding `#` comments are removed from their original position—so modified tables move into the managed region and lose their comments (extra keys inside the table are kept). Everything else outside the managed region—other TOML tables, comments, key order, and any unowned or unchanged `[mcp_servers.<name>]` tables—keeps its content (blank lines around the managed region may be normalized).
 
 ```toml
 # >>> one-setup-all-agents >>>
@@ -334,7 +338,7 @@ See the individual reports in [`docs/verification/`](verification/) and the [Sup
   - `startup_timeout_sec` is not stored (`Unsupported`).
 - **All tools:**
   - `auth` is documentation-only and is not written to any tool.
-  - Header schemes must start with a letter when written to Claude Code or OpenCode (`^[A-Za-z][A-Za-z0-9._-]*$`); a scheme starting with a digit passes the source loader but is reported as `Unsupported` by adapters.
+  - Header schemes have a regex mismatch between the source loader and the adapters: the source loader (`config_source.py`) accepts `[A-Za-z0-9_-]+`, so a scheme containing `.` is refused by the loader (`SourceError`) while a scheme starting with a digit passes; Claude Code and OpenCode require `^[A-Za-z][A-Za-z0-9._-]*$`, so a scheme starting with a digit is reported as `Unsupported` by those adapters. (Codex accepts only `Bearer` on `Authorization`.)
 
 ### How `Unsupported` and `Conflict` are reported
 
@@ -344,7 +348,7 @@ See the individual reports in [`docs/verification/`](verification/) and the [Sup
   - In `all-agents sync --dry-run` and `all-agents sync`, gaps are counted in the summary line (`Plan: ... N unsupported`) and listed under `Not supported by the tool (shown so the gap is visible):`. `Unsupported` entries do **not** cause `sync` to fail (exit code stays `0` when there are no conflicts or errors).
   - In `all-agents status`, once a tool's `mcp` kind has no reader errors, conflicts, or pending changes, it shows `mcp: unsupported (reasons: ...)`. The tool's overall status still reports `in sync` and `status` exits `0`, because an `Unsupported` entry is a permanent capability gap rather than drift.
 - **`Conflict` (something in the way):**
-  - Reported when a server with the same name already exists and was not created or adopted by `all-agents`, when a tool config file cannot be parsed, or when the `claude` CLI is missing for a pending Claude Code MCP change.
+  - Reported when a server with the same name already exists, was not created or adopted by `all-agents`, and differs from what would be written (an identical unowned entry is left alone with no conflict), when a tool config file cannot be parsed, or when the `claude` CLI is missing for a pending Claude Code MCP change.
   - Conflicting items are left untouched. They appear under `Conflicts (left alone, not changed):` in `sync` (exit code `3`) and as `mcp: conflict (...)` in `status` (exit code `2`).
 
 ## Walkthrough: From OpenCode to All Tools
