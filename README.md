@@ -119,9 +119,11 @@ Overrides: Setting `ALL_AGENTS_CONFIG_DIR` or `ALL_AGENTS_STATE_DIR` overrides t
 
 `one-setup-all-agents` operates under a zero-secret-exposure principle:
 
-- **Variable References Only:** Secrets (API keys, tokens, auth headers) are referenced strictly by environment-variable name (e.g. `${GITHUB_TOKEN}` or `Authorization: Bearer <NAME>`).
+- **Variable References Only:** Secrets (API keys, tokens, auth headers) are referenced strictly by environment-variable name (e.g. `${GITHUB_TOKEN}` or `Authorization: Bearer ${NAME}`).
 - **No Secret Values:** Cleartext secret values are never requested, read from your environment, printed to stdout/stderr, written to disk, or stored in journals or backups.
 - **CLI Guard:** If an adapter must run an external CLI (such as `claude mcp add-json`), arguments are scanned to ensure no secret values are passed on the process command line.
+
+For the full `mcp.jsonc` schema, variable reference rules, per-tool translations, and limits, see the [MCP servers guide](docs/mcp.md).
 
 ## Supported tools
 
