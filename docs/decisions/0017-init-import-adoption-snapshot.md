@@ -1,6 +1,7 @@
 # 0017: Init, import, adoption, and safety snapshots
 
 Status: Proposed
+Superseded in part by [0021](0021-mcp-source-and-adapter-alignment.md) (point 4: MCP literal-secret import behavior).
 
 Phase 4 introduces the public `all-agents init` command. Its purpose is to detect installed tools, import existing configurations into the unified source configuration layout (`config.toml`, `mcp.jsonc`, `instructions.md`, `skills/`), adopt matching configurations into the engine ledger, and ensure safety guarantees through snapshots and dry-run reviews.
 

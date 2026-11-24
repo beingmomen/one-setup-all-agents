@@ -5,15 +5,17 @@ Masks sensitive strings and home paths, and respects interactivity flags.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 
-from ._core.mask import mask_text
+from ._core.mask import mask_fallbacks, mask_text
 from .context import CommandContext
 from .detect import mask_home
 
 
 def _mask_multiline(text: str, ctx: CommandContext) -> str:
     """Mask secrets and home paths line by line to handle anchored tokens."""
+    text = mask_fallbacks(text)  # a fallback may run across lines
     return "\n".join(mask_home(mask_text(line), ctx.env) for line in text.split("\n"))
 
 
@@ -23,6 +25,23 @@ def say(ctx: CommandContext, text: str) -> None:
     if not masked.endswith("\n"):
         masked += "\n"
     ctx.out.write(masked)
+    ctx.out.flush()
+
+
+def _mask_strings(value, ctx: CommandContext):
+    if isinstance(value, str):
+        return _mask_multiline(value, ctx)
+    if isinstance(value, dict):
+        return {_mask_strings(k, ctx): _mask_strings(v, ctx) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_mask_strings(v, ctx) for v in value]
+    return value
+
+
+def say_json(ctx: CommandContext, data) -> None:
+    """Print `data` as JSON with every string masked BEFORE serialising, so masking can never
+    cut into the JSON syntax (a mask that runs to the end of a line would eat a closing quote)."""
+    ctx.out.write(json.dumps(_mask_strings(data, ctx), indent=2) + "\n")
     ctx.out.flush()
 
 

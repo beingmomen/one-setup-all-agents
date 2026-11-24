@@ -568,5 +568,122 @@ class RenderTests(PlanCase):
         self.assertEqual(self.listing(self.root), before)
 
 
+class RenderMaskingTests(unittest.TestCase):
+    def test_secret_keys_and_numbers_are_masked_and_no_line_is_lost(self):
+        from one_setup_all_agents.model import Conflict, Kind, RunCli
+
+        payload = (
+            '{"headers": {"Authorization": "demo-raw"}, "env": {"API_KEY": 987654321}, '
+            '"cookie": {"sid": "demo-cookie"}}'
+        )
+        name = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"
+        plan = Plan(
+            [
+                Conflict("claude", Kind.MCP, name, "an entry this tool did not create"),
+                Conflict("opencode", Kind.MCP, "a", "value ${V:-don't} is invalid"),
+                Conflict("codex", Kind.MCP, "b", "another conflict that stays visible"),
+                RunCli(["claude", "mcp", "add-json", "c", payload], ["claude"], "add c"),
+            ]
+        )
+        text = render_plan(plan)
+        self.assertNotIn("demo-raw", text)
+        self.assertNotIn("987654321", text)
+        self.assertNotIn("demo-cookie", text)
+        self.assertNotIn(name, text)
+        self.assertIn("another conflict that stays visible", text)
+
+    def test_a_json_argument_is_judged_field_by_field(self):
+        from one_setup_all_agents.engine.plan import runcli_has_secret
+        from one_setup_all_agents.model import RunCli
+
+        clean = (
+            '{"type":"stdio","command":"npx","args":["--endpoint","http://localhost:8080",'
+            '"@modelcontextprotocol/server-demo"]}'
+        )
+        self.assertFalse(runcli_has_secret(RunCli(["claude", "add-json", "d", clean], ["x"], "d")))
+        tricky = (
+            '{"url":"https://a:b","@c":1,"headers":{"Authorization":"demo-raw"},'
+            '"env":{"API_KEY":987654321},"args":["--token",4242]}'
+        )
+        op = RunCli(["claude", "add-json", "d", tricky], ["x"], "d")
+        self.assertTrue(runcli_has_secret(op))
+        text = render_plan(Plan([op]))
+        for raw in ("demo-raw", "987654321", "4242"):
+            self.assertNotIn(raw, text)
+
+    def test_a_json_argument_with_a_key_written_twice_is_refused(self):
+        from one_setup_all_agents.engine.plan import runcli_has_secret
+        from one_setup_all_agents.model import RunCli
+
+        doc = '{"env":{"api_key":"demo-literal","api_key":"${API_KEY}"}}'
+        op = RunCli(["claude", "add-json", "d", doc], ["x"], "d")
+        self.assertTrue(runcli_has_secret(op))
+        self.assertNotIn("demo-literal", render_plan(Plan([op])))
+
+    def test_a_held_back_replacement_is_one_conflict_keyed_by_its_server(self):
+        from one_setup_all_agents.engine.plan import _refused_runcli
+        from one_setup_all_agents.model import ItemRef, RunCli
+
+        remove = RunCli(["claude", "remove", "demo"], ["claude"], "replace (remove old) demo")
+        add = RunCli(
+            ["claude", "add-json", "demo", "{}"],
+            ["claude", "remove", "demo"],
+            "add demo",
+            claims=(ItemRef("claude", Kind.MCP, "demo"),),
+        )
+        found = [_refused_runcli([remove, add], i, "claude", Kind.MCP) for i in (0, 1)]
+        self.assertEqual({c.key for _, c in found}, {"demo"})
+        self.assertEqual(len({identity for identity, _ in found}), 1)
+
+    def test_two_servers_whose_names_mask_alike_stay_two_conflicts(self):
+        from one_setup_all_agents.engine.plan import _refused_runcli
+        from one_setup_all_agents.model import ItemRef, RunCli
+
+        names = ["a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6", "z9y8x7w6v5u4t3s2r1q0p9o8n7m6l5k4"]
+        ops = [
+            RunCli(["claude", "remove", n], ["claude"], "remove", releases=(ItemRef("claude", Kind.MCP, n),))
+            for n in names
+        ]
+        found = [_refused_runcli(ops, i, "claude", Kind.MCP) for i in (0, 1)]
+        self.assertEqual({c.key for _, c in found}, {"***"})
+        self.assertEqual(len({identity for identity, _ in found}), 2)
+
+    def test_a_direct_reason_replaces_the_conflict_of_its_own_server_only(self):
+        from one_setup_all_agents.engine.plan import _hold_back
+        from one_setup_all_agents.model import ItemRef, RunCli
+
+        secret = "ghp_" + "Ab1" * 8
+        # three credential-shaped names: all mask to ***
+        names = [
+            "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
+            "z9y8x7w6v5u4t3s2r1q0p9o8n7m6l5k4",
+            "q1w2e3r4t5y6u7i8o9p0a1s2d3f4g5h6",
+        ]
+        ops = []
+        for n, arg in zip(names, ("{}", secret, secret), strict=True):
+            # the argv names a neutral alias so that only `arg` decides the direct reason
+            ops.append(RunCli(["claude", "remove", "demo"], ["claude"], "replace (remove old)"))
+            claim = (ItemRef("claude", Kind.MCP, n),)
+            ops.append(RunCli(["claude", "add-json", "demo", arg], ["claude"], "add", claims=claim))
+        held = _hold_back(ops, "claude", Kind.MCP)
+        self.assertEqual([c.key for c in held], ["***"] * 3)
+        direct = [not c.reason.startswith("not run") for c in held]
+        self.assertEqual(direct, [False, True, True])
+
+    def test_a_stray_apostrophe_never_hides_later_entries(self):
+        from one_setup_all_agents.model import Conflict, Kind, Unsupported
+
+        plan = Plan(
+            [
+                Conflict("opencode", Kind.MCP, "a", "value ${V:-don't} is invalid"),
+                Conflict("codex", Kind.MCP, "b", "important conflict that stays visible"),
+                Unsupported("opencode", Kind.MCP, "c: variable name 'x}' cannot be written"),
+            ]
+        )
+        text = render_plan(plan)
+        self.assertIn("important conflict that stays visible", text)
+        self.assertIn("Not supported by the tool", text)
+
+
 if __name__ == "__main__":
     unittest.main()

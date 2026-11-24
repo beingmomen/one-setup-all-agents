@@ -161,6 +161,27 @@ class InitMcpTests(unittest.TestCase):
         prop = propose_mcp([r1, r2], [a1, a2], self.env)
         self.assertEqual(prop.servers["demo"].server.startup_timeout_sec, 45)
 
+    def test_opencode_v1_entry_is_adopted_when_only_the_timeout_differs(self):
+        adapters = {a.id: a for a in all_adapters()}
+        opencode = adapters["opencode"]
+        path = opencode.paths(self.env, Scope.GLOBAL).mcp
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '{"mcp": {"demo": {"type": "local", "command": ["cmd"]}}}\n', encoding="utf-8"
+        )
+        current = opencode.read_mcp(self.env, Scope.GLOBAL)
+        self.assertIsNone(current["demo"].startup_timeout_sec)
+        timed = McpServer("demo", command="cmd", startup_timeout_sec=45)
+        readings = [
+            ToolReading("codex", "Codex", None, {"demo": timed}, (), ()),
+            ToolReading("opencode", "OpenCode", None, current, (), ()),
+        ]
+
+        prop = propose_mcp(readings, [adapters["codex"], opencode], self.env)
+        self.assertEqual(prop.servers["demo"].server.startup_timeout_sec, 45)
+        adopted = sorted(ref.tool for ref in prop.adopt if ref.key == "demo")
+        self.assertEqual(adopted, ["codex", "opencode"])
+
     def test_disabled_import(self):
         a1 = self._dummy_adapter("tool-a", "Tool A")
         s = McpServer("demo", command="cmd", enabled=False)
@@ -405,6 +426,61 @@ class InitMcpTests(unittest.TestCase):
             for msg in header_msgs:
                 self.assertNotIn("variable named Authorization", msg)
                 self.assertIn("environment variable", msg)
+
+    def test_a_server_whose_name_is_a_credential_is_not_imported_or_shown(self):
+        adapter = all_adapters()[0]
+        from one_setup_all_agents.model import ImportNote
+
+        name = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"
+        server = McpServer(name, command="c")
+        reading = ToolReading(adapter.id, adapter.label, None, {name: server}, (), ())
+        note = ImportNote(tool=adapter.id, server=name, field="env", name="X")
+        self.assertEqual(note.server, "***")  # a note never carries the name raw
+        with patch.object(adapter, "import_notes", return_value=[note]):
+            proposal = propose_mcp([reading], {adapter.id: adapter}, self.env)
+        self.assertEqual(proposal.servers, {})
+        texts = proposal.messages + [c for cs in proposal.notes.values() for c in cs]
+        self.assertTrue(texts)
+        self.assertTrue(all(name not in t for t in texts + list(proposal.notes)))
+
+    def test_a_server_really_named_like_the_mask_keeps_its_notes(self):
+        adapter = all_adapters()[0]
+        from one_setup_all_agents.model import ImportNote
+
+        server = McpServer("***", command="c")
+        reading = ToolReading(adapter.id, adapter.label, None, {"***": server}, (), ())
+        note = ImportNote(tool=adapter.id, server="***", field="header", name="X-Demo")
+        self.assertFalse(note.server_hidden)
+        with patch.object(adapter, "import_notes", return_value=[note]):
+            proposal = propose_mcp([reading], {adapter.id: adapter}, self.env)
+        self.assertTrue(any("X-Demo" in m for m in proposal.messages))
+
+    def test_an_entry_named_by_position_is_not_offered_as_a_variable_name(self):
+        adapter = all_adapters()[0]
+        from one_setup_all_agents.model import ImportNote
+
+        reading = ToolReading(adapter.id, adapter.label, None, {}, (), ())
+        note = ImportNote(tool=adapter.id, server="srv1", field="env", name="env_vars[2]")
+        with patch.object(adapter, "import_notes", return_value=[note]):
+            proposal = propose_mcp([reading], {adapter.id: adapter}, self.env)
+        texts = proposal.messages + [c for cs in proposal.notes.values() for c in cs]
+        self.assertTrue(texts)
+        self.assertTrue(all("variable named env_vars" not in t for t in texts))
+        self.assertTrue(all("check that entry" in t for t in texts))
+
+    def test_a_header_name_that_looks_like_a_secret_is_masked_in_messages_and_notes(self):
+        adapter = all_adapters()[0]
+        from one_setup_all_agents.model import ImportNote
+
+        key = "ghp_" + "c3" * 12
+        reading = ToolReading(adapter.id, adapter.label, None, {}, (), ())
+        note = ImportNote(tool=adapter.id, server="srv1", field="header", name=key)
+        with patch.object(adapter, "import_notes", return_value=[note]):
+            proposal = propose_mcp([reading], {adapter.id: adapter}, self.env)
+        texts = proposal.messages + [c for cs in proposal.notes.values() for c in cs]
+        texts += [n.name for n in proposal.import_notes]
+        self.assertTrue(texts)
+        self.assertTrue(all(key not in t for t in texts))
 
 
 if __name__ == "__main__":

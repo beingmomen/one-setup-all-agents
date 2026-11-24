@@ -1,6 +1,7 @@
 # 0015: Source layout v1
 
 Status: Proposed
+Superseded in part by [0021](0021-mcp-source-and-adapter-alignment.md) (point 2: `mcp.jsonc` transport rules, secret checks, header schemes, and `description`).
 
 ADR 0003 established the disk locations and file names of the shared source folder (`config.toml`, `instructions.md`, `instructions.<tool>.md`, `mcp.jsonc`, `skills/<name>/SKILL.md`), but left the concrete schemas, per-tool tables, rendering semantics, and loader/writer behaviors to be decided. This ADR defines source layout v1 for the new engine and loader.
 

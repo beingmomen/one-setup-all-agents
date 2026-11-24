@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import json
 
-from .._core.mask import mask_text
+from .._core.mask import mask_name, mask_text
 from ..adapters import all_adapters
 from ..config_source import (
     SOURCE_CONFIG_NAME,
@@ -20,7 +19,7 @@ from ..engine import journal
 from ..engine.plan import build_plan
 from ..model import Kind, Plan, Unsupported
 from ..reader import read_all
-from ..ui import say, warn
+from ..ui import say, say_json, warn
 
 
 def _render_human_status(tools_data: list[dict], undoable_count: int) -> str:
@@ -64,7 +63,7 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
                 "tools": [],
                 "undoable_operations": 0,
             }
-            say(ctx, json.dumps(data, indent=2))
+            say_json(ctx, data)
         elif quiet:
             warn(ctx, "not initialised: run `all-agents init`")
         else:
@@ -80,7 +79,7 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
         source_config = load_source(ctx.env.config_dir, list(adapters_by_id.keys()))
     except SourceError as exc:
         if is_json:
-            say(ctx, json.dumps({"schema": 1, "error": str(exc)}, indent=2))
+            say_json(ctx, {"schema": 1, "error": str(exc)})
         else:
             warn(ctx, str(exc))
         return 1
@@ -107,7 +106,7 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
         plan = build_plan(ctx.env, active_adapters, desired) if active_adapters else Plan()
     except journal.JournalError as exc:
         if is_json:
-            say(ctx, json.dumps({"schema": 1, "error": str(exc)}, indent=2))
+            say_json(ctx, {"schema": 1, "error": str(exc)})
         else:
             warn(ctx, str(exc))
         return 1
@@ -156,7 +155,10 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
                 if conflicts:
                     kinds_data[k.value] = {
                         "state": "conflict",
-                        "items": sorted({mask_text(mask_home(c.key, ctx.env)) for c in conflicts}),
+                        # one item per conflict: two names that mask alike stay two items
+                        "items": sorted(
+                            mask_name(mask_text(mask_home(c.key, ctx.env))) for c in conflicts
+                        ),
                         "reasons": [mask_text(mask_home(c.reason, ctx.env)) for c in conflicts],
                     }
                     continue
@@ -171,14 +173,13 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
                     )
                 ]
                 if exec_ops:
-                    items = sorted(
-                        {
-                            mask_text(mask_home(r.key, ctx.env))
-                            for op in exec_ops
-                            for r in (*getattr(op, "claims", ()), *getattr(op, "releases", ()))
-                            if r.tool == a.id and r.kind == k
-                        }
-                    )
+                    keys = {  # by the original name: two names that mask alike stay two items
+                        r.key
+                        for op in exec_ops
+                        for r in (*getattr(op, "claims", ()), *getattr(op, "releases", ()))
+                        if r.tool == a.id and r.kind == k
+                    }
+                    items = sorted(mask_name(mask_text(mask_home(key, ctx.env))) for key in keys)
                     kinds_data[k.value] = {
                         "state": "differs",
                         "items": items,
@@ -245,7 +246,7 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
             undoable_count = len(journal.list_undoable(ctx.env.state_dir))
         except journal.JournalError as exc:
             if is_json:
-                say(ctx, json.dumps({"schema": 1, "error": str(exc)}, indent=2))
+                say_json(ctx, {"schema": 1, "error": str(exc)})
             else:
                 warn(ctx, str(exc))
             return 1
@@ -279,7 +280,7 @@ def run(args: argparse.Namespace, ctx: CommandContext) -> int:
             "tools": tools_data,
             "undoable_operations": undoable_count,
         }
-        say(ctx, json.dumps(data, indent=2))
+        say_json(ctx, data)
     else:
         say(ctx, _render_human_status(tools_data, undoable_count))
 

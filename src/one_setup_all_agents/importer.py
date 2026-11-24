@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ._core.mask import mask_text
+from ._core.mask import looks_like_credential, mask_text
 from .adapters import ADAPTERS
 from .adapters.base import ToolAdapter
 from .config_source import (
@@ -246,15 +246,24 @@ def propose_mcp(
     tool_labels = {r.tool: r.label for r in readings}
 
     servers_by_name: dict[str, list[tuple[str, McpServer]]] = {}
+    hidden_names: list[str] = []  # tools with a server whose NAME is a credential
     for r in readings:
         for sname, srv in r.mcp.items():
+            if looks_like_credential(sname):  # never copied into the source, never shown
+                hidden_names.append(r.label)
+                continue
             servers_by_name.setdefault(sname, []).append((r.tool, srv))
 
     proposal_servers: dict[str, ServerEntry] = {}
     proposal_notes: dict[str, list[str]] = {}
     proposal_adopt: list[ItemRef] = []
-    messages: list[str] = []
+    messages: list[str] = [
+        f"a server name in {label} looks like a secret; that server was not imported"
+        for label in dict.fromkeys(hidden_names)
+    ]
     import_notes: list[ImportNote] = []
+    # (tool, server name, chosen form, the tool's own form): compared after the loop
+    candidates: list[tuple[str, str, McpServer, McpServer]] = []
 
     for name in sorted(servers_by_name.keys()):
         entries = servers_by_name[name]
@@ -365,41 +374,61 @@ def propose_mcp(
         proposal_servers[name] = ServerEntry(server=chosen, tools=tools_selector)
 
         for tool_id, current_srv in entries:
-            adapter = adapter_map.get(tool_id)
-            if adapter is not None:
-                expected_dict = adapter.normalize_mcp({name: chosen})
-                expected_norm = expected_dict.get(name)
-                current_dict = adapter.normalize_mcp({name: current_srv})
-                current_norm = current_dict.get(name)
-                if current_norm is not None and current_norm == expected_norm:
-                    proposal_adopt.append(ItemRef(tool_id, Kind.MCP, name))
+            if tool_id in adapter_map:
+                candidates.append((tool_id, name, chosen, current_srv))
+
+    # one normalization per tool and side (a tool may read its config file to normalize)
+    expected_by_tool: dict[str, dict[str, McpServer]] = {}
+    current_by_tool: dict[str, dict[str, McpServer]] = {}
+    for tool_id in dict.fromkeys(c[0] for c in candidates):
+        adapter = adapter_map[tool_id]
+        mine = [c for c in candidates if c[0] == tool_id]
+        expected_by_tool[tool_id] = adapter.normalize_mcp({n: ch for _, n, ch, _ in mine}, env)
+        current_by_tool[tool_id] = adapter.normalize_mcp({n: cur for _, n, _, cur in mine}, env)
+    for tool_id, name, _chosen, _current in candidates:
+        current_norm = current_by_tool[tool_id].get(name)
+        if current_norm is not None and current_norm == expected_by_tool[tool_id].get(name):
+            proposal_adopt.append(ItemRef(tool_id, Kind.MCP, name))
 
     for r in readings:
         adapter = adapter_map.get(r.tool)
         if adapter is not None:
             tool_notes = adapter.import_notes(env, Scope.GLOBAL)
             for note in tool_notes:
+                if note.server_hidden:
+                    continue  # its name is a credential: not imported, never shown
+                # a field name may itself be a misfiled credential: never carry it raw
+                note_name = mask_text(note.name)
+                note = dataclasses.replace(note, name=note_name)
                 import_notes.append(note)
                 if note.field == "header":
                     msg = (
-                        f"server {note.server} in {adapter.label}: header '{note.name}' "
+                        f"server {note.server} in {adapter.label}: header '{note_name}' "
                         "had a literal value that was not imported; "
                         "reference an environment variable as ${NAME}"
                     )
                     note_comment = (
-                        f"{adapter.label}: header '{note.name}' had a literal value that was not "
+                        f"{adapter.label}: header '{note_name}' had a literal value that was not "
                         "imported; reference an environment variable as ${NAME}"
+                    )
+                elif "[" in note_name:  # an entry named by its position, not a variable name
+                    msg = (
+                        f"server {note.server} in {adapter.label}: {note_name} was not imported; "
+                        "check that entry"
+                    )
+                    note_comment = (
+                        f"{adapter.label}: {note_name} was not imported; check that entry"
                     )
                 else:
                     msg = (
-                        f"server {note.server} in {adapter.label}: {note.field} {note.name} "
+                        f"server {note.server} in {adapter.label}: {note.field} {note_name} "
                         "had a literal value that was not imported; "
-                        f"set it as an environment variable named {note.name}"
+                        f"set it as an environment variable named {note_name}"
                     )
                     note_comment = (
-                        f"{adapter.label}: {note.field} {note.name} had a literal value "
+                        f"{adapter.label}: {note.field} {note_name} had a literal value "
                         "that was not imported; "
-                        f"set it as an environment variable named {note.name}"
+                        f"set it as an environment variable named {note_name}"
                     )
                 messages.append(msg)
                 proposal_notes.setdefault(note.server, []).append(note_comment)

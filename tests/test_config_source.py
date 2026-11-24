@@ -1,5 +1,6 @@
 """Tests for config_source loader, validator, and renderers."""
 
+import dataclasses
 import re
 import tempfile
 import unittest
@@ -260,6 +261,28 @@ class ConfigSourceTests(unittest.TestCase):
             load_source(self.config_dir, self.adapter_ids)
         self.assertIn("is not a valid environment variable name", str(ctx.exception))
 
+    def test_an_env_var_name_or_header_variable_with_a_trailing_line_break_is_refused(self):
+        env_vars = '{"version": 1, "servers": {"s1": {"command": "demo", "env_vars": ["TOK\\n"]}}}'
+        with self.assertRaises(SourceError):
+            load_source_texts("version = 1\n", self.adapter_ids, mcp_jsonc=env_vars)
+        problems = config_source.server_secret_problems(
+            McpServer(
+                "srv",
+                url="https://demo.example.test/mcp",
+                headers=(HeaderRef("Authorization", "TOK\n", "Bearer"),),
+            )
+        )
+        self.assertEqual(problems, ["header"])
+        url = "https://demo.example.test/mcp"
+        for headers in (
+            {"Authorization": "${TOK}\n"},
+            {"Authorization": "Bearer\n ${TOK}"},
+            (("Authorization", "${TOK}\r"),),
+        ):
+            with self.subTest(headers=headers):
+                server = McpServer("srv", url=url, headers=headers)
+                self.assertEqual(config_source.server_secret_problems(server), ["header"])
+
     def test_leak1_env_vars_invalid_name_does_not_leak_secret(self):
         fake = "sk-" + "a1" * 20
         (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
@@ -469,6 +492,91 @@ class ConfigSourceTests(unittest.TestCase):
         )
         with self.assertRaises(SourceError):
             load_source(self.config_dir, self.adapter_ids)
+
+    def test_a_header_value_with_a_line_break_is_refused(self):
+        for value in (r"Bearer\n ${TOKEN}", r"${TOKEN}\n", r"Bearer\r\n${TOKEN}"):
+            with self.subTest(value=value):
+                mcp = (
+                    '{"version": 1, "servers": {"r": {"url": "https://api.example.test/mcp", '
+                    '"headers": {"Authorization": "' + value + '"}}}}'
+                )
+                with self.assertRaises(SourceError) as ctx:
+                    load_source_texts("version = 1\n", self.adapter_ids, mcp_jsonc=mcp)
+                self.assertIn("must not contain a line break", str(ctx.exception))
+
+    def test_a_header_name_that_is_a_credential_is_refused(self):
+        key = "ghp_" + "a7" * 12
+        mcp = (
+            '{"version": 1, "servers": {"r": {"url": "https://api.example.test/mcp", '
+            '"headers": {"' + key + '": "${TOKEN}"}}}}'
+        )
+        with self.assertRaises(SourceError) as ctx:
+            load_source_texts("version = 1\n", self.adapter_ids, mcp_jsonc=mcp)
+        self.assertNotIn(key, str(ctx.exception))
+        server = McpServer("r", url="https://api.example.test/mcp", headers=(HeaderRef(key, "T"),))
+        self.assertEqual(config_source.server_secret_problems(server), ["header"])
+        with self.assertRaises(ValueError) as err:
+            McpServer("r", command="c", env=((key, "demo"),))
+        self.assertNotIn(key, str(err.exception))
+        with self.assertRaises(ValueError) as err:
+            McpServer("r", command="c", env=((key, "ok"),), env_vars=(key,))
+        self.assertNotIn(key, str(err.exception))
+        padded = " a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6 "
+        with self.assertRaises(ValueError) as err:
+            McpServer("r", command="c", env=((padded, "demo"),))
+        self.assertNotIn(padded.strip(), str(err.exception))
+
+    def test_a_variable_name_that_is_a_credential_is_refused(self):
+        key = "ghp_" + "e2" * 12
+        url = "https://api.example.test/mcp"
+        for server in (
+            '{"command": "c", "env_vars": ["' + key + '"]}',
+            '{"url": "' + url + '", "headers": {"Authorization": "Bearer ${' + key + '}"}}',
+            '{"url": "' + url + '", "headers": {"X-Demo": "' + key + ' ${TOKEN}"}}',
+        ):
+            with self.subTest(server=server[:20]):
+                mcp = '{"version": 1, "servers": {"s": ' + server + "}}"
+                with self.assertRaises(SourceError) as ctx:
+                    load_source_texts("version = 1\n", self.adapter_ids, mcp_jsonc=mcp)
+                self.assertNotIn(key, str(ctx.exception))
+        ref = McpServer("s", url=url, headers=(HeaderRef("Authorization", key, "Bearer"),))
+        self.assertEqual(config_source.server_secret_problems(ref), ["header"])
+        for headers in ({key: "${TOKEN}"}, {"X-Demo": "${" + key + "}"}, ((key, "${TOKEN}"),)):
+            with self.subTest(headers=str(type(headers))):
+                plain = McpServer("s", url=url, headers=headers)
+                self.assertEqual(config_source.server_secret_problems(plain), ["header"])
+        bad_var = McpServer("s", command="c", env_vars=("not-a-var",))
+        self.assertEqual(config_source.server_secret_problems(bad_var), ["env"])
+
+    def test_a_server_name_that_is_a_credential_is_refused_without_showing_it(self):
+        name = " a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6 "
+        mcp = '{"version": 1, "servers": {"' + name + '": {"command": "c"}}}'
+        with self.assertRaises(SourceError) as ctx:
+            load_source_texts("version = 1\n", self.adapter_ids, mcp_jsonc=mcp)
+        self.assertNotIn(name.strip(), str(ctx.exception))
+
+    def test_a_json_argument_holding_a_secret_is_a_problem(self):
+        server = McpServer("s", command="c", args=('{"api_key":"demo-short"}',))
+        self.assertEqual(config_source.server_secret_problems(server), ["arg"])
+
+    def test_server_secret_problems_checks_the_header_scheme(self):
+        url = "https://demo.example.test/mcp"
+        for scheme, ok in (
+            (None, True),
+            ("Bearer", True),
+            ("OAuth2.0", True),
+            ("Token-v2_x", True),
+            ("1Bearer", False),
+            ("_Bearer", False),
+            ("", False),
+            ("Bearer\n", False),
+        ):
+            with self.subTest(scheme=scheme):
+                server = McpServer(
+                    "srv", url=url, headers=(HeaderRef("Authorization", "DEMO_TOKEN", scheme),)
+                )
+                problems = config_source.server_secret_problems(server)
+                self.assertEqual(problems, [] if ok else ["header"])
 
     def test_strict_types_startup_timeout_sec_positive_number_not_bool(self):
         (self.config_dir / SOURCE_CONFIG_NAME).write_text("version = 1\n", encoding="utf-8")
@@ -725,6 +833,20 @@ class ConfigSourceTests(unittest.TestCase):
             str(ctx.exception),
         )
 
+    def test_startup_timeout_sec_integer_too_large_for_a_float_is_a_source_error(self):
+        mcp = (
+            '{"version": 1, "servers": {"srv": {"command": "echo", '
+            '"startup_timeout_sec": 1' + "0" * 400 + "}}}"
+        )
+        with self.assertRaises(SourceError) as ctx:
+            load_source_texts(
+                config_toml="version = 1\n", valid_tool_ids=self.adapter_ids, mcp_jsonc=mcp
+            )
+        self.assertIn(
+            "'startup_timeout_sec' in server 'srv' must be a positive number",
+            str(ctx.exception),
+        )
+
     def test_unknown_field_and_setting_masks_secret_looking_key(self):
         secret_key = "ghp_" + "1" * 20
         toml_text = f"version = 1\n[tools.example]\nenabled = true\n{secret_key} = true\n"
@@ -770,6 +892,124 @@ class ConfigSourceTests(unittest.TestCase):
             )
         self.assertEqual(str(ctx.exception), "server 'srv' is invalid")
         self.assertNotIn("non_secret_value", str(ctx.exception))
+
+    def test_header_scheme_with_dot_is_accepted_and_round_trips(self):
+        mcp_text = """{
+  "version": 1,
+  "servers": {
+    "remote": {
+      "url": "https://api.example.test/mcp",
+      "headers": {
+        "Authorization": "OAuth2.0 ${API_TOKEN}",
+        "X-Alt": "Custom_Scheme-1.2 ${ALT_TOKEN}"
+      }
+    }
+  }
+}"""
+        cfg = load_source_texts("version = 1\n", self.adapter_ids, mcp_jsonc=mcp_text)
+        headers = cfg.servers["remote"].server.headers
+        self.assertEqual(
+            headers,
+            (
+                HeaderRef("Authorization", "API_TOKEN", "OAuth2.0"),
+                HeaderRef("X-Alt", "ALT_TOKEN", "Custom_Scheme-1.2"),
+            ),
+        )
+        reloaded = load_source_texts(
+            "version = 1\n", self.adapter_ids, mcp_jsonc=render_mcp_source(cfg.servers)
+        )
+        self.assertEqual(reloaded.servers["remote"].server.headers, headers)
+
+    def test_header_scheme_starting_with_digit_underscore_or_hyphen_is_refused(self):
+        for bad_scheme in ("1Bearer", "_Bearer", "-Bearer", "Bad Scheme"):
+            with self.subTest(scheme=bad_scheme):
+                mcp_text = f"""{{
+  "version": 1,
+  "servers": {{
+    "remote": {{
+      "url": "https://api.example.test/mcp",
+      "headers": {{ "Authorization": "{bad_scheme} ${{API_TOKEN}}" }}
+    }}
+  }}
+}}"""
+                with self.assertRaises(SourceError) as ctx:
+                    load_source_texts("version = 1\n", self.adapter_ids, mcp_jsonc=mcp_text)
+                msg = str(ctx.exception)
+                self.assertIn("invalid header scheme", msg)
+                self.assertNotIn(bad_scheme, msg)
+
+    def test_description_preserved_through_source_round_trip_and_never_written_to_tools(self):
+        from one_setup_all_agents.adapters import ADAPTERS
+        from one_setup_all_agents.model import EditFile, RunCli, Scope
+
+        mcp_text = """{
+  "version": 1,
+  "servers": {
+    "demo-local": {
+      "description": "Local stdio note for humans only",
+      "command": "demo-bin",
+      "args": ["--flag"]
+    },
+    "demo-remote": {
+      "description": "Remote HTTP note for humans only",
+      "url": "https://api.example.test/mcp"
+    }
+  }
+}"""
+        adapter_ids = tuple(cls.id for cls in ADAPTERS)
+        cfg = load_source_texts("version = 1\n", adapter_ids, mcp_jsonc=mcp_text)
+        self.assertEqual(cfg.servers["demo-local"].description, "Local stdio note for humans only")
+        self.assertEqual(cfg.servers["demo-remote"].description, "Remote HTTP note for humans only")
+        self.assertFalse(hasattr(cfg.servers["demo-local"].server, "description"))
+
+        rendered = render_mcp_source(cfg.servers)
+        self.assertIn("Local stdio note for humans only", rendered)
+        self.assertIn("Remote HTTP note for humans only", rendered)
+        reloaded = load_source_texts("version = 1\n", adapter_ids, mcp_jsonc=rendered)
+        self.assertEqual(
+            reloaded.servers["demo-local"].description, "Local stdio note for humans only"
+        )
+        self.assertEqual(
+            reloaded.servers["demo-remote"].description, "Remote HTTP note for humans only"
+        )
+
+        # Verify no registered adapter writes description anywhere in its planned output.
+        env = make_env(self.config_dir / "home")
+        fake_claude = self.config_dir / "fake-claude"
+        fake_claude.write_text("", encoding="utf-8")  # Claude Code plans `claude mcp` calls
+        env = dataclasses.replace(env, environ={"ALL_AGENTS_CLAUDE_BIN": str(fake_claude)})
+        for cls in ADAPTERS:
+            adapter = cls()
+            desired = desired_for(reloaded, adapter.id)
+            ops = adapter.plan_mcp(env, Scope.GLOBAL, desired.mcp, frozenset())
+            writes = [op for op in ops if isinstance(op, (EditFile, RunCli))]
+            self.assertTrue(writes, f"{adapter.id} planned no write: {ops}")
+            for op in ops:
+                if isinstance(op, EditFile):
+                    text = op.transform(None).decode("utf-8")
+                    self.assertNotIn("Local stdio note", text, adapter.id)
+                    self.assertNotIn("Remote HTTP note", text, adapter.id)
+                    self.assertNotIn('"description"', text, adapter.id)
+                elif isinstance(op, RunCli):
+                    joined = " ".join(op.argv)
+                    self.assertNotIn("Local stdio note", joined, adapter.id)
+                    self.assertNotIn("Remote HTTP note", joined, adapter.id)
+                    self.assertNotIn('"description"', joined, adapter.id)
+
+    def test_description_rejects_non_string_and_allows_null(self):
+        mcp_null = '{"version": 1, "servers": {"s": {"command": "echo", "description": null}}}'
+        cfg = load_source_texts("version = 1\n", self.adapter_ids, mcp_jsonc=mcp_null)
+        self.assertIsNone(cfg.servers["s"].description)
+        self.assertNotIn('"description"', render_mcp_source(cfg.servers))
+
+        for bad in ("123", "true", '["a"]', "{}"):
+            with self.subTest(bad=bad):
+                mcp_bad = (
+                    f'{{"version": 1, "servers": {{"s": {{"command": "echo", "description": {bad}}}}}}}'
+                )
+                with self.assertRaises(SourceError) as ctx:
+                    load_source_texts("version = 1\n", self.adapter_ids, mcp_jsonc=mcp_bad)
+                self.assertIn("description", str(ctx.exception))
 
 
 if __name__ == "__main__":

@@ -24,5 +24,6 @@ Short ADRs. Each one gives the decision, the reason and the open points. Status 
 | [0018](0018-commands-sync-status-undo.md) | Commands v1 (sync, status, undo) | Proposed |
 | [0019](0019-verification-results-v0.1.md) | Verification results v0.1 | Proposed |
 | [0020](0020-release-and-publishing.md) | Release and publishing | Proposed |
+| [0021](0021-mcp-source-and-adapter-alignment.md) | MCP source and adapter alignment | Proposed |
 
 

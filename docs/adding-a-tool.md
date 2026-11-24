@@ -59,7 +59,7 @@ Every adapter inherits from `ToolAdapter` (in `src/one_setup_all_agents/adapters
 ### Normalization and Documentation
 
 - `normalize_instructions(text)`: Normalizes instruction text to match what survives a write and read cycle. Defaults to returning `text` unchanged.
-- `normalize_mcp(servers)`: Normalizes desired `McpServer` mappings by stripping fields the tool's format cannot store (e.g. resetting `startup_timeout_sec=None`). Anything not explicitly stripped must survive round-trip tests.
+- `normalize_mcp(servers, env=None)`: Normalizes desired `McpServer` mappings by stripping fields the tool's format cannot store (e.g. resetting `startup_timeout_sec=None`). Anything not explicitly stripped must survive round-trip tests. `env` (passed by `init` and the contract tests) lets a tool whose format depends on its existing config file answer for that file; ignore it otherwise.
 - `notes()`: Returns a list of strings documenting known limits or quirks of the tool displayed by `status`.
 
 ## Operation Rules
@@ -199,6 +199,8 @@ def plan_mcp(
     return ops
 
 
-def normalize_mcp(self, servers: Mapping[str, McpServer]) -> dict[str, McpServer]:
+def normalize_mcp(
+    self, servers: Mapping[str, McpServer], env: Env | None = None
+) -> dict[str, McpServer]:
     return {n: replace(s, startup_timeout_sec=None) for n, s in servers.items()}
 ```

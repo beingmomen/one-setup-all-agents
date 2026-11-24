@@ -376,7 +376,7 @@ class AdapterContract:
                     self.assertEqual(got.text, a.normalize_instructions(d.instructions))
                     self.assertEqual(got.path, a.paths(h.env, Scope.GLOBAL).instructions)
                 if Kind.MCP in self.caps(h):
-                    expected = a.normalize_mcp(d.mcp)
+                    expected = a.normalize_mcp(d.mcp, h.env)
                     self.assertEqual(
                         set(expected),
                         set(d.mcp) - d.unwritten,

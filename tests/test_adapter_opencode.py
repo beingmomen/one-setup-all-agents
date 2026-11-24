@@ -352,7 +352,14 @@ class McpFormatTests(Base):
         )
         out = a.normalize_mcp({"l": local, "r": remote})
         self.assertEqual(
-            out["l"], McpServer(name="l", command="npx", args=("p",), env=(("M", "1"),))
+            out["l"],
+            McpServer(
+                name="l",
+                command="npx",
+                args=("p",),
+                env=(("M", "1"),),
+                startup_timeout_sec=9,
+            ),
         )
         self.assertEqual(
             out["r"],
@@ -363,6 +370,52 @@ class McpFormatTests(Base):
                 enabled=False,
             ),
         )
+
+    def test_decode_startup_timeout_reads_positive_whole_seconds_from_v2_ms_only(self):
+        self.assertEqual(
+            decode_server("n", {"type": "local", "command": ["c"], "timeout": {"startup": 30000}})
+            .startup_timeout_sec,
+            30,
+        )
+        self.assertEqual(
+            decode_server(
+                "r",
+                {"type": "remote", "url": "https://x.example.test", "timeout": {"startup": 45000}},
+            ).startup_timeout_sec,
+            45,
+        )
+        for bad_timeout in (
+            {"startup": 1500},
+            {"startup": 0},
+            {"startup": -1000},
+            {"startup": True},
+            {"catalog": 30000},
+            5000,
+        ):
+            with self.subTest(timeout=bad_timeout):
+                self.assertIsNone(
+                    decode_server(
+                        "n", {"type": "local", "command": ["c"], "timeout": bad_timeout}
+                    ).startup_timeout_sec
+                )
+
+    def test_a_whole_number_written_as_a_float_is_read_as_its_seconds(self):
+        def read(startup):
+            entry = {"type": "local", "command": ["c"], "timeout": {"startup": startup}}
+            return decode_server("n", entry).startup_timeout_sec
+
+        self.assertEqual(read(45000.0), 45)
+        self.assertIsNone(read(1500.0))  # not whole seconds
+        self.assertIsNone(read(45000.5))
+
+    def test_a_failed_edit_check_never_shows_a_credential_shaped_name(self):
+        from one_setup_all_agents.adapters.opencode import _check_result, _McpEdit
+
+        name = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"
+        text = json.dumps({"mcp": {"servers": {name: {"command": ["c"]}}}})
+        with self.assertRaises(ValueError) as caught:
+            _check_result(text, _McpEdit(removes=(name,)), ("mcp", "servers"))
+        self.assertNotIn(name, str(caught.exception))
 
 
 # -- MCP: planning and editing -------------------------------------------------------------------
@@ -502,6 +555,197 @@ class McpPlanTests(Base):
         self.applier.apply(Plan(ops))
         self.assertEqual(self.config_file.read_bytes(), original)
 
+    def test_removing_last_header_from_owned_server_removes_headers_and_undoes(self):
+        with_hdr = {
+            "demo-remote": McpServer(
+                name="demo-remote",
+                url="https://demo.example.test/mcp",
+                headers=(HeaderRef("Authorization", "DEMO_TOKEN", "Bearer"),),
+            )
+        }
+        self.sync_mcp(with_hdr)
+        before = self.config_file.read_bytes()
+        self.assertIn("headers", self.doc()["mcp"]["servers"]["demo-remote"])
+
+        without_hdr = {
+            "demo-remote": McpServer(name="demo-remote", url="https://demo.example.test/mcp")
+        }
+        ops = self.plan_mcp(without_hdr)
+        self.assertEqual([type(o) for o in ops], [EditFile])
+        receipt = self.applier.apply(Plan(ops))
+        self.assertNotIn("headers", self.doc()["mcp"]["servers"]["demo-remote"])
+        self.assertEqual(self.plan_mcp(without_hdr), [])
+
+        self.applier.undo(receipt)
+        self.assertEqual(self.config_file.read_bytes(), before)
+
+    def test_default_valued_keys_of_owned_server_are_replaced_not_duplicated(self):
+        url = "https://demo.example.test/mcp"
+        self.sync_mcp({"demo-remote": McpServer(name="demo-remote", url=url)})
+        doc = self.doc()
+        doc["mcp"]["servers"]["demo-remote"].update({"headers": {}, "disabled": False})
+        self.write_config(json.dumps(doc, indent=2) + "\n")
+
+        desired = {
+            "demo-remote": McpServer(
+                name="demo-remote",
+                url=url,
+                headers=(HeaderRef("Authorization", "DEMO_TOKEN", "Bearer"),),
+                enabled=False,
+            )
+        }
+        self.sync_mcp(desired)
+        text = self.config_file.read_text(encoding="utf-8")
+        self.assertEqual(text.count('"headers"'), 1)
+        self.assertEqual(text.count('"disabled"'), 1)
+        entry = self.doc()["mcp"]["servers"]["demo-remote"]
+        self.assertEqual(entry["headers"], {"Authorization": "Bearer {env:DEMO_TOKEN}"})
+        self.assertIs(entry["disabled"], True)
+        self.assertEqual(self.plan_mcp(desired), [])
+
+    def test_literal_header_conflict_comes_before_an_unwritable_desired_server(self):
+        url = "https://demo.example.test/mcp"
+        entry = {"type": "remote", "url": url, "headers": {"Authorization": "Bearer FAKE-literal"}}
+        self.write_config(json.dumps({"mcp": {"servers": {"demo-remote": entry}}}) + "\n")
+        desired = McpServer(
+            name="demo-remote", url=url, headers=(HeaderRef("Bad Header", "DEMO_TOKEN"),)
+        )
+        ops = self.plan_mcp({"demo-remote": desired}, owned=())
+        self.assertEqual([type(o) for o in ops], [Conflict])
+
+    def test_unowned_server_with_literal_header_is_a_conflict_and_never_leaks_value(self):
+        from one_setup_all_agents.engine.plan import render_plan
+
+        secret = "FAKE-HDR-SECRET-opencode-999"
+        self.write_config(
+            json.dumps(
+                {
+                    "mcp": {
+                        "servers": {
+                            "demo-remote": {
+                                "type": "remote",
+                                "url": "https://demo.example.test/mcp",
+                                "headers": {"Authorization": f"Bearer {secret}"},
+                            }
+                        }
+                    }
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        before = self.config_file.read_bytes()
+        ops = self.plan_mcp(
+            {"demo-remote": McpServer(name="demo-remote", url="https://demo.example.test/mcp")},
+            owned=(),
+        )
+        self.assertEqual([type(o) for o in ops], [Conflict])
+        self.assertEqual(ops[0].key, "demo-remote")
+        plan = Plan(ops)
+        self.assertEqual(plan.executable, [])
+        self.assertNotIn(secret, ops[0].reason)
+        self.assertNotIn(secret, render_plan(plan))
+        self.applier.apply(plan)
+        self.assertEqual(self.config_file.read_bytes(), before)
+
+    def test_startup_timeout_written_in_ms_preserves_sibling_keys_and_undoes(self):
+        local = self.stdio("s", startup_timeout_sec=60)
+        remote = McpServer(
+            name="r", url="https://demo.example.test/mcp", startup_timeout_sec=30
+        )
+        ops = self.plan_mcp({"s": local, "r": remote})
+        self.assertEqual([type(o) for o in ops], [EditFile])
+        self.applier.apply(Plan(ops))
+        self.assertEqual(self.doc()["mcp"]["servers"]["s"]["timeout"], {"startup": 60000})
+        self.assertEqual(self.doc()["mcp"]["servers"]["r"]["timeout"], {"startup": 30000})
+        self.assertEqual(self.adapter.read_mcp(self.env, G)["s"].startup_timeout_sec, 60)
+        self.assertEqual(self.adapter.read_mcp(self.env, G)["r"].startup_timeout_sec, 30)
+        self.assertEqual(self.plan_mcp({"s": local, "r": remote}), [])
+
+        # Add sibling timeout keys by hand; updating startup_timeout_sec must keep them.
+        doc = self.doc()
+        doc["mcp"]["servers"]["s"]["timeout"]["catalog"] = 15000
+        doc["mcp"]["servers"]["s"]["timeout"]["execution"] = 120000
+        self.config_file.write_text(json.dumps(doc, indent=2) + "\n", "utf-8")
+        before_update = self.config_file.read_bytes()
+
+        updated = self.stdio("s", startup_timeout_sec=45)
+        r2 = self.applier.apply(Plan(self.plan_mcp({"s": updated, "r": remote})))
+        self.assertEqual(
+            self.doc()["mcp"]["servers"]["s"]["timeout"],
+            {"startup": 45000, "catalog": 15000, "execution": 120000},
+        )
+        self.assertEqual(self.plan_mcp({"s": updated, "r": remote}), [])
+
+        self.applier.undo(r2)
+        self.assertEqual(self.config_file.read_bytes(), before_update)
+
+        # Undoing a clean create without an intervening manual edit removes the file.
+        self.config_file.unlink()
+        r3 = self.applier.apply(Plan(self.plan_mcp({"s": local, "r": remote}, owned=())))
+        self.assertEqual(self.doc()["mcp"]["servers"]["s"]["timeout"], {"startup": 60000})
+        self.applier.undo(r3)
+        self.assertFalse(self.config_file.exists())
+
+    def _timeout_text(self, timeout_body):
+        """A config whose owned server `s` has the given text as its `timeout` object."""
+        self.sync_mcp({"s": self.stdio("s", startup_timeout_sec=60)})
+        text = self.config_file.read_text("utf-8")
+        start = text.index('"timeout"')
+        end = text.index("}", start) + 1
+        self.write_config(text[:start] + '"timeout": ' + timeout_body + text[end:])
+
+    def test_timeout_change_edits_only_startup_and_keeps_comments(self):
+        self._timeout_text('{\n  // keep this note\n  "startup": 60000,\n  "catalog": 15000\n}')
+        desired = {"s": self.stdio("s", startup_timeout_sec=45)}
+        self.sync_mcp(desired)
+        self.assertIn("// keep this note", self.config_file.read_text("utf-8"))
+        self.assertEqual(
+            self.doc()["mcp"]["servers"]["s"]["timeout"], {"startup": 45000, "catalog": 15000}
+        )
+        self.assertEqual(self.plan_mcp(desired), [])
+
+    def test_timeout_startup_that_is_not_an_integer_is_corrected(self):
+        for raw, seconds, want in (("true", 0.001, 1), ("1500.5", 2, 2000)):
+            with self.subTest(raw=raw):
+                self.config_file.unlink(missing_ok=True)
+                self._timeout_text('{"startup": ' + raw + "}")
+                desired = {"s": self.stdio("s", startup_timeout_sec=seconds)}
+                self.assertEqual([type(o) for o in self.plan_mcp(desired)], [EditFile])
+                self.sync_mcp(desired)
+                startup = self.doc()["mcp"]["servers"]["s"]["timeout"]["startup"]
+                self.assertEqual((type(startup), startup), (int, want))
+                self.assertEqual(self.plan_mcp(desired), [])
+
+    def test_a_whole_number_float_timeout_is_kept_as_written(self):
+        self._timeout_text('{"startup": 30000.0}')
+        self.assertEqual(self.plan_mcp({"s": self.stdio("s", startup_timeout_sec=30)}), [])
+
+    def test_a_timeout_key_written_twice_fails_and_leaves_the_file_unchanged(self):
+        from one_setup_all_agents.engine.errors import ApplyError
+
+        self._timeout_text('{"startup": 60000}, "timeout": {"startup": 60000}')
+        before = self.config_file.read_bytes()
+        ops = self.plan_mcp({"s": self.stdio("s", startup_timeout_sec=45)})
+        with self.assertRaises(ApplyError):
+            self.applier.apply(Plan(ops))
+        self.assertEqual(self.config_file.read_bytes(), before)
+
+    def test_fractional_startup_timeout_is_written_as_milliseconds_once(self):
+        desired = {"s": self.stdio("s", startup_timeout_sec=1.5)}
+        self.sync_mcp(desired)
+        self.assertEqual(self.doc()["mcp"]["servers"]["s"]["timeout"], {"startup": 1500})
+        self.assertEqual(self.plan_mcp(desired), [])
+
+    def test_hand_added_timeout_is_kept_when_the_source_sets_none(self):
+        self._timeout_text('{"startup": 90000, "execution": 5000}')
+        desired = {"s": self.stdio("s")}
+        self.assertEqual(self.plan_mcp(desired), [])
+        self.sync_mcp({"s": self.stdio("s", enabled=False)})
+        self.assertEqual(
+            self.doc()["mcp"]["servers"]["s"]["timeout"], {"startup": 90000, "execution": 5000}
+        )
+
     def test_only_owned_entries_are_removed(self):
         self.write_config(FIXTURE.read_bytes())
         self.sync_mcp({"demo-server": self.stdio()})
@@ -576,18 +820,59 @@ class McpUnsupportedTests(Base):
     def reasons(self, ops):
         return " | ".join(o.reason for o in ops if isinstance(o, Unsupported))
 
-    def test_startup_timeout_is_reported_not_silently_dropped(self):
+    def test_startup_timeout_is_reported_unsupported_in_v1_layout(self):
+        self.write_config(
+            '{\n  "mcp": {\n    "user-v1": {"type": "local", "command": ["u"]}\n  }\n}\n'
+        )
         ops = self.plan_mcp({"s": self.stdio("s", startup_timeout_sec=60)})
         self.assertEqual([type(o) for o in ops], [EditFile, Unsupported])
         self.assertIn("s: startup_timeout_sec not stored", self.reasons(ops))
-        self.assertNotIn(
-            "startup", self.config_file.read_text("utf-8") if self.config_file.exists() else ""
-        )
-        # reported again, but a plan that only reports is "empty" for the engine
         self.applier.apply(Plan(ops))
+        self.assertNotIn("timeout", self.doc()["mcp"]["s"])
+        # reported again, but a plan that only reports is "empty" for the engine
         again = Plan(self.plan_mcp({"s": self.stdio("s", startup_timeout_sec=60)}))
         self.assertTrue(again.is_empty)
         self.assertIn("startup_timeout_sec", self.reasons(again.ops))
+
+    def test_startup_timeout_too_large_for_milliseconds_is_reported_not_raised(self):
+        desired = {"s": self.stdio("s", startup_timeout_sec=1e306)}
+        ops = self.plan_mcp(desired)
+        self.assertEqual([type(o) for o in ops], [EditFile, Unsupported])
+        self.assertIn("s: startup_timeout_sec (too large) not stored", self.reasons(ops))
+        self.applier.apply(Plan(ops))
+        self.assertIn("s", self.doc()["mcp"]["servers"])
+        self.assertNotIn("timeout", self.doc()["mcp"]["servers"]["s"])
+        self.assertTrue(Plan(self.plan_mcp(desired)).is_empty)
+        self.assertIsNone(self.adapter.normalize_mcp(desired)["s"].startup_timeout_sec)
+
+    def test_startup_timeout_above_the_millisecond_limit_is_reported_not_raised(self):
+        max_ms = 2**53 - 1
+        for seconds in (10**306, max_ms // 1000 + 1):
+            with self.subTest(seconds=seconds):
+                desired = {"s": self.stdio("s", startup_timeout_sec=seconds)}
+                ops = self.plan_mcp(desired)
+                self.assertIn("s: startup_timeout_sec (too large) not stored", self.reasons(ops))
+                self.assertIsNone(self.adapter.normalize_mcp(desired)["s"].startup_timeout_sec)
+        largest = {"s": self.stdio("s", startup_timeout_sec=max_ms // 1000)}
+        self.assertEqual([type(o) for o in self.plan_mcp(largest)], [EditFile])
+        self.sync_mcp(largest)
+        self.assertEqual(
+            self.doc()["mcp"]["servers"]["s"]["timeout"], {"startup": max_ms // 1000 * 1000}
+        )
+
+    def test_normalize_gives_the_timeout_that_reading_back_returns(self):
+        for seconds, want in ((45, 45), (29.9999, 30), (1.5, None)):
+            with self.subTest(seconds=seconds):
+                servers = {"s": self.stdio("s", startup_timeout_sec=seconds)}
+                self.assertEqual(self.adapter.normalize_mcp(servers)["s"].startup_timeout_sec, want)
+        self.sync_mcp({"s": self.stdio("s", startup_timeout_sec=29.9999)})
+        self.assertEqual(self.adapter.read_mcp(self.env, G)["s"].startup_timeout_sec, 30)
+
+    def test_normalize_drops_the_timeout_for_the_v1_layout_only_when_env_is_given(self):
+        self.write_config('{\n  "mcp": {\n    "user-v1": {"type": "local", "command": ["u"]}\n  }\n}\n')
+        servers = {"s": self.stdio("s", startup_timeout_sec=45)}
+        self.assertIsNone(self.adapter.normalize_mcp(servers, self.env)["s"].startup_timeout_sec)
+        self.assertEqual(self.adapter.normalize_mcp(servers)["s"].startup_timeout_sec, 45)
 
     def test_remote_server_fields_with_no_place_are_reported(self):
         server = McpServer(
@@ -642,6 +927,170 @@ class McpUnsupportedTests(Base):
         self.assertEqual(notes[0].server, "srv")
         self.assertEqual(notes[0].field, "env")
         self.assertEqual(notes[0].name, "TOKEN")
+
+    def test_a_credential_used_as_an_env_name_is_dropped_noted_and_masked(self):
+        key = "ghp_" + "e5" * 12
+        entry = {"type": "local", "command": ["c"], "environment": {key: "demo"}}
+        self.write_config(json.dumps({"mcp": {"servers": {"demo": entry}}}))
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual(len(notes), 1)
+        self.assertNotIn(key, notes[0].name)
+        self.assertEqual(self.adapter.read_mcp(self.env, G)["demo"].env, ())
+
+    def test_a_credential_used_as_a_variable_name_is_never_imported(self):
+        key = "ghp_" + "b8" * 12
+        environment = {key: "{env:" + key + "}"}
+        entry = {"type": "local", "command": ["c"], "environment": environment}
+        self.write_config(json.dumps({"mcp": {"servers": {"demo": entry}}}))
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual([n.field for n in notes], ["env"])
+        self.assertTrue(all(key not in n.name for n in notes))
+        self.assertEqual(self.adapter.read_mcp(self.env, G)["demo"].env_vars, ())
+
+    def test_a_credential_used_as_a_header_scheme_is_literal(self):
+        key = "ghp_" + "f3" * 12
+        url = "https://demo.example.test/mcp"
+        entry = {"type": "remote", "url": url, "headers": {"X-Demo": key + " {env:TOKEN}"}}
+        self.write_config(json.dumps({"mcp": {"servers": {"demo": entry}}}))
+        self.assertEqual([n.field for n in self.adapter.import_notes(self.env, G)], ["header"])
+        self.assertEqual(self.adapter.read_mcp(self.env, G)["demo"].headers, ())
+        ops = self.plan_mcp({"demo": McpServer(name="demo", url=url)}, owned=())
+        self.assertEqual([type(o) for o in ops], [Conflict])
+
+    def test_headers_that_are_not_an_object_are_literal_for_import_and_plan(self):
+        url = "https://demo.example.test/mcp"
+        entry = {"type": "remote", "url": url, "headers": "not-an-object"}
+        self.write_config(json.dumps({"mcp": {"servers": {"demo": entry}}}))
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual([(n.field, n.name) for n in notes], [("header", "headers")])
+        ops = self.plan_mcp({"demo": McpServer(name="demo", url=url)}, owned=())
+        self.assertEqual([type(o) for o in ops], [Conflict])
+
+    def test_an_environment_that_is_not_an_object_gets_a_note(self):
+        for key in ("env", "environment"):
+            with self.subTest(key=key):
+                entry = {"type": "local", "command": ["c"], key: "not-an-object"}
+                self.write_config(json.dumps({"mcp": {"servers": {"demo": entry}}}))
+                notes = self.adapter.import_notes(self.env, G)
+                self.assertEqual([(n.field, n.name) for n in notes], [("env", key)])
+
+    def test_null_headers_and_environment_count_as_absent(self):
+        url = "https://demo.example.test/mcp"
+        entry = {"type": "remote", "url": url, "headers": None, "environment": None}
+        self.write_config(json.dumps({"mcp": {"servers": {"demo": entry}}}))
+        self.assertEqual(self.adapter.import_notes(self.env, G), [])
+        desired = {"demo": McpServer(name="demo", url=url)}
+        self.assertEqual(self.plan_mcp(desired, owned=("demo",)), [])
+
+    def test_an_empty_environment_counts_as_absent(self):
+        entry = {"type": "local", "command": ["demo-cmd"], "environment": {}, "env": {}}
+        self.write_config(json.dumps({"mcp": {"servers": {"s": entry}}}))
+        self.assertEqual(self.plan_mcp({"s": self.stdio("s")}, owned=("s",)), [])
+        desired = {"s": self.stdio("s", env=(("MODE", "test"),))}
+        self.applier.apply(Plan(self.plan_mcp(desired, owned=("s",))))
+        text = self.config_file.read_text("utf-8")
+        self.assertEqual(text.count('"environment"'), 1)
+        self.assertEqual(self.doc()["mcp"]["servers"]["s"]["environment"], {"MODE": "test"})
+
+    def test_a_number_is_not_taken_for_a_boolean_switch(self):
+        entry = {"type": "local", "command": ["demo-cmd"], "disabled": 1}
+        self.write_config(json.dumps({"mcp": {"servers": {"s": entry}}}))
+        desired = {"s": self.stdio("s", enabled=False)}
+        self.assertEqual([type(o) for o in self.plan_mcp(desired, owned=("s",))], [EditFile])
+        self.applier.apply(Plan(self.plan_mcp(desired, owned=("s",))))
+        self.assertIs(self.doc()["mcp"]["servers"]["s"]["disabled"], True)
+
+    def test_the_legacy_env_alias_gets_a_note_so_init_does_not_adopt(self):
+        entry = {"type": "local", "command": ["c"], "env": {"API_KEY": "FAKE-SECRET"}}
+        self.write_config(json.dumps({"mcp": {"servers": {"demo": entry}}}))
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual([(n.server, n.field, n.name) for n in notes], [("demo", "env", "API_KEY")])
+
+    def test_a_json_environment_value_holding_a_secret_is_not_imported(self):
+        environment = {"APP_CONFIG": '{"api_key":"demo-literal"}', "MODE": "plain"}
+        entry = {"type": "local", "command": ["c"], "environment": environment}
+        self.write_config(json.dumps({"mcp": {"servers": {"demo": entry}}}))
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual([n.name for n in notes], ["APP_CONFIG"])
+        self.assertEqual(self.adapter.read_mcp(self.env, G)["demo"].env, (("MODE", "plain"),))
+
+    def test_every_environment_entry_that_is_not_imported_gets_a_note(self):
+        environment = {
+            "SAME": "{env:SAME}",
+            "API_TOKEN": "{env:API_TOKEN:FAKE-FALLBACK}",
+            "OTHER": "{env:SOMETHING_ELSE}",
+            "NUMBER": 7,
+            "MODE": "plain",
+        }
+        entry = {"type": "local", "command": ["c"], "environment": environment}
+        self.write_config(json.dumps({"mcp": {"servers": {"demo": entry}}}))
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual(sorted(n.name for n in notes), ["API_TOKEN", "NUMBER", "OTHER"])
+        server = self.adapter.read_mcp(self.env, G)["demo"]
+        self.assertEqual((server.env_vars, server.env), (("SAME",), (("MODE", "plain"),)))
+
+    def test_a_non_string_header_is_literal_for_import_and_plan_alike(self):
+        url = "https://demo.example.test/mcp"
+        entry = {"type": "remote", "url": url, "headers": {"Authorization": [1234]}}
+        self.write_config(json.dumps({"mcp": {"servers": {"demo": entry}}}))
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual([(n.server, n.field) for n in notes], [("demo", "header")])
+        ops = self.plan_mcp({"demo": McpServer(name="demo", url=url)}, owned=())
+        self.assertEqual([type(o) for o in ops], [Conflict])
+
+    def test_a_header_reference_with_a_trailing_line_break_is_literal(self):
+        url = "https://demo.example.test/mcp"
+        entry = {"type": "remote", "url": url, "headers": {"X-Demo": "Bearer {env:TOKEN}\n"}}
+        self.write_config(json.dumps({"mcp": {"servers": {"demo": entry}}}))
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual([(n.server, n.field) for n in notes], [("demo", "header")])
+        self.assertEqual(self.adapter.read_mcp(self.env, G)["demo"].headers, ())
+
+    def test_removing_the_last_v1_server_named_like_a_top_level_key_succeeds(self):
+        for name in ("mcp", "$schema"):
+            with self.subTest(name=name):
+                entry = {"type": "local", "command": ["echo"]}
+                doc = {"$schema": "https://opencode.ai/config.json", "mcp": {name: entry}}
+                self.write_config(json.dumps(doc) + "\n")
+                ops = self.plan_mcp({}, owned=(name,))
+                self.assertEqual([type(o) for o in ops], [EditFile])
+                self.applier.apply(Plan(ops))
+                self.assertEqual(self.doc()["mcp"], {})
+
+    def test_removing_the_last_v1_server_written_twice_fails_and_keeps_the_file(self):
+        from one_setup_all_agents.engine.errors import ApplyError
+
+        self.write_config(
+            '{"mcp": {"mcp": {"other": 1}, "mcp": {"type": "local", "command": ["echo"]}}}\n'
+        )
+        before = self.config_file.read_bytes()
+        ops = self.plan_mcp({}, owned=("mcp",))
+        with self.assertRaises(ApplyError):
+            self.applier.apply(Plan(ops))
+        self.assertEqual(self.config_file.read_bytes(), before)
+
+    def test_a_v1_server_named_servers_is_not_taken_for_the_v2_container(self):
+        self.write_config('{"mcp": {"servers": {"enabled": false}}}\n')
+        ops = self.plan_mcp({"servers": self.stdio("servers")}, owned=())
+        self.assertEqual([type(o) for o in ops], [Conflict])
+        self.write_config('{"mcp": {"servers": {"type": "local", "command": ["u"]}}}\n')
+        self.assertEqual(set(self.adapter.read_mcp(self.env, G)), {"servers"})
+
+    def test_a_v1_file_with_only_on_off_overrides_is_the_v1_layout(self):
+        self.write_config('{"mcp": {"demo": {"enabled": false}}}\n')
+        ops = self.plan_mcp({"demo": self.stdio("demo", startup_timeout_sec=45)}, owned=())
+        self.assertEqual([type(o) for o in ops], [Conflict, Unsupported])
+        self.sync_mcp({"other": self.stdio("other")})
+        doc = self.doc()
+        self.assertNotIn("servers", doc["mcp"])
+        self.assertEqual(doc["mcp"]["demo"], {"enabled": False})
+        self.assertEqual(doc["mcp"]["other"], {"type": "local", "command": ["demo-cmd"]})
+
+    def test_a_startup_timeout_out_of_range_is_not_read(self):
+        for startup in (10**400, 9007199254741000, 0, -1000):
+            with self.subTest(startup=startup):
+                entry = {"type": "local", "command": ["c"], "timeout": {"startup": startup}}
+                self.assertIsNone(decode_server("n", entry).startup_timeout_sec)
 
 
 class UnreadableConfigTests(Base):
