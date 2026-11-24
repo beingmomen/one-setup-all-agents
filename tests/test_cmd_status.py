@@ -172,6 +172,67 @@ class CmdStatusTests(EngineCase):
                 conflict_found = True
         self.assertTrue(conflict_found)
 
+    def test_two_conflicts_whose_names_mask_alike_stay_two_items(self):
+        from unittest.mock import patch
+
+        from one_setup_all_agents.engine.plan import Plan
+        from one_setup_all_agents.model import Conflict, Kind
+
+        self._init_and_sync()
+        tool = all_adapters()[0].id
+        names = ["a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6", "z9y8x7w6v5u4t3s2r1q0p9o8n7m6l5k4"]
+        plan = Plan([Conflict(tool, Kind.MCP, n, "demo reason") for n in names])
+        ctx_json, out_json, _ = self._ctx()
+        with patch("one_setup_all_agents.commands.status.build_plan", return_value=plan):
+            main(["status", "--json"], context=ctx_json)
+        text = out_json.getvalue()
+        mcp = next(t for t in json.loads(text)["tools"] if t["id"] == tool)["kinds"]["mcp"]
+        self.assertEqual(mcp["items"], ["***", "***"])
+        self.assertTrue(all(n not in text for n in names))
+
+    def test_pending_items_whose_names_mask_alike_stay_masked_and_separate(self):
+        from unittest.mock import patch
+
+        from one_setup_all_agents.engine.plan import Plan
+        from one_setup_all_agents.model import ItemRef, Kind, RunCli
+
+        self._init_and_sync()
+        tool = all_adapters()[0].id
+        names = [" a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6", "z9y8x7w6v5u4t3s2r1q0p9o8n7m6l5k4"]
+        plan = Plan(
+            [
+                RunCli(["demo", "remove", "x"], ["demo"], "remove", releases=(ItemRef(tool, Kind.MCP, n),))
+                for n in names
+            ]
+        )
+        for as_json in (True, False):
+            ctx, out, _ = self._ctx()
+            with patch("one_setup_all_agents.commands.status.build_plan", return_value=plan):
+                main(["status", "--json"] if as_json else ["status"], context=ctx)
+            text = out.getvalue()
+            self.assertTrue(all(n.strip() not in text for n in names))
+            if as_json:
+                tools = json.loads(text)["tools"]
+                mcp = next(t for t in tools if t["id"] == tool)["kinds"]["mcp"]
+                self.assertEqual(mcp["items"], ["***", "***"])
+
+    def test_json_stays_valid_when_a_name_looks_like_a_header(self):
+        from unittest.mock import patch
+
+        from one_setup_all_agents.engine.plan import Plan
+        from one_setup_all_agents.model import ItemRef, Kind, RunCli
+
+        self._init_and_sync()
+        tool = all_adapters()[0].id
+        ref = ItemRef(tool, Kind.MCP, "demo-cookie:")
+        plan = Plan([RunCli(["demo", "remove", "x"], ["demo"], "remove", releases=(ref,))])
+        ctx, out, _ = self._ctx()
+        with patch("one_setup_all_agents.commands.status.build_plan", return_value=plan):
+            main(["status", "--json"], context=ctx)
+        tools = json.loads(out.getvalue())["tools"]  # never cut by masking
+        mcp = next(t for t in tools if t["id"] == tool)["kinds"]["mcp"]
+        self.assertEqual(mcp["items"], ["demo-cookie:"])
+
     def test_unreadable_config_exits_two(self):
         self._init_and_sync()
 

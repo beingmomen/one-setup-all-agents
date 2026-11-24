@@ -70,6 +70,30 @@ def _skip_value(text, i):
     return i
 
 
+def _lead_start(text, start, key_start):
+    """Start of a member's own lines: just after the first newline in text[start:key_start]
+    that is outside a comment (a /* ... */ that opens on the previous member's line, even
+    across lines, stays with that member). With no such newline, just after the last block
+    comment before the key (so that comment stays too), else `start`."""
+    i = start
+    after_comment = start
+    while i < key_start:
+        if text[i] == "\n":
+            return i + 1
+        if text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            if end == -1:
+                raise EditError("unterminated block comment")
+            i = end + 2
+            after_comment = i
+        elif text.startswith("//", i):
+            nl = text.find("\n", i)
+            i = nl if nl != -1 else key_start
+        else:
+            i += 1
+    return after_comment
+
+
 class Member:
     def __init__(self, key, lead_start, key_start, value_start, value_end, comma, end):
         self.key, self.lead_start, self.key_start = key, lead_start, key_start
@@ -114,9 +138,7 @@ def members_of(text, open_idx):
             )
         ):
             member_end = (nl + 1) if nl != -1 else len(text)
-        region = text[prev_end:j]
-        nl_in = region.find("\n")
-        lead_start = prev_end + nl_in + 1 if nl_in != -1 else prev_end
+        lead_start = _lead_start(text, prev_end, j)
         out.append(Member(key, lead_start, j, v, v_end, comma, member_end))
         i = comma + 1 if comma is not None else v_end
         prev_end = i

@@ -15,11 +15,12 @@ adapter may refine them, through a new ADR.
 from __future__ import annotations
 
 import enum
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ._core.mask import env_value_looks_secret
+from ._core.mask import env_value_looks_secret, mask_name
 
 
 class Scope(enum.Enum):
@@ -153,6 +154,16 @@ class ImportNote:
     server: str
     field: str  # "env" | "header" | "arg"
     name: str
+    #: the server's NAME is a credential: the server is never imported and the note never shown
+    #: (set from the raw name, so a server really named `***` is not taken for a hidden one)
+    server_hidden: bool = field(default=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # a server or field name may itself be a misfiled credential: a note never carries it raw
+        if mask_name(self.server) != self.server:
+            object.__setattr__(self, "server_hidden", True)
+        object.__setattr__(self, "server", mask_name(self.server))
+        object.__setattr__(self, "name", mask_name(self.name))
 
 
 @dataclass(frozen=True)
@@ -161,6 +172,12 @@ class Instructions:
 
     path: Path
     text: str
+
+
+#: Shared rule for an HTTP header scheme (for example `Bearer`, `OAuth2.0`).
+#: Starts with an ASCII letter and continues with ASCII letters, digits, `.`, `_` or `-`.
+HEADER_SCHEME_PATTERN = r"[A-Za-z][A-Za-z0-9._-]*"
+HEADER_SCHEME_RE = re.compile(rf"\A{HEADER_SCHEME_PATTERN}\Z")  # \Z: no trailing newline
 
 
 @dataclass(frozen=True)
@@ -208,14 +225,16 @@ class McpServer:
         env = tuple(sorted((str(k), str(v)) for k, v in pairs))
         names = [k for k, _ in env]
         if len(names) != len(set(names)):
-            raise ValueError(f"{self.name}: a name appears twice in env")
+            raise ValueError(f"{mask_name(self.name)}: a name appears twice in env")
         both = sorted(set(names) & set(self.env_vars))
         if both:
-            raise ValueError(f"{self.name}: {both} is in both env and env_vars")
+            shown = [mask_name(n) for n in both]
+            raise ValueError(f"{mask_name(self.name)}: {shown} is in both env and env_vars")
         for key, value in env:
             if env_value_looks_secret(key, value):
                 raise ValueError(
-                    f"{self.name}: env {key} looks like a secret; pass it by name in env_vars"
+                    f"{mask_name(self.name)}: env {mask_name(key)} looks like a secret; "
+                    "pass it by name in env_vars"
                 )
         object.__setattr__(self, "env", env)
 

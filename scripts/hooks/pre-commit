@@ -3,9 +3,32 @@
 # Enable it once per clone:   git config core.hooksPath scripts/hooks
 # Patterns live in the git-ignored file .personal-patterns (or the PERSONAL_PATTERNS variable), never in the repository.
 root=$(git rev-parse --show-toplevel) || exit 1
-PY=$(command -v python3 || command -v python) || { echo "pre-commit: python not found; guard skipped" >&2; exit 0; }
+
+PY=""
+PY_ARG=""
+for c in python3 python; do
+    if command -v "$c" >/dev/null 2>&1 && "$c" -c "import sys; sys.exit(sys.version_info[0] < 3)" >/dev/null 2>&1; then
+        PY="$c"
+        break
+    fi
+done
+if [ -z "$PY" ]; then
+    if command -v py >/dev/null 2>&1 && py -3 -c "import sys; sys.exit(sys.version_info[0] < 3)" >/dev/null 2>&1; then
+        PY="py"
+        PY_ARG="-3"
+    else
+        echo "pre-commit: python not found; guard skipped" >&2
+        exit 0
+    fi
+fi
+
 if [ ! -f "$root/.personal-patterns" ] && [ -z "$PERSONAL_PATTERNS" ]; then
     echo "pre-commit: no personal-data patterns configured (.personal-patterns); guard skipped" >&2
     exit 0
 fi
-exec "$PY" "$root/scripts/check_personal_data.py" --root "$root" --staged
+
+if [ -n "$PY_ARG" ]; then
+    exec "$PY" "$PY_ARG" "$root/scripts/check_personal_data.py" --root "$root" --staged
+else
+    exec "$PY" "$root/scripts/check_personal_data.py" --root "$root" --staged
+fi

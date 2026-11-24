@@ -15,8 +15,9 @@ Where Claude Code keeps things (global scope)
 never from the OS), else `<home>/.claude`. `<claude.json>` is `$CLAUDE_CONFIG_DIR/.claude.json`
 when the variable is set and `<home>/.claude.json` otherwise: the official docs say that with the
 variable set, Claude Code reads `.claude.json` from inside that directory instead of from the home
-directory. [Windows: verified with the real tool for the default locations; the effect of
-`CLAUDE_CONFIG_DIR` is from the docs and UNVERIFIED with a live tool; Linux and macOS UNVERIFIED.]
+directory. [Verified on Windows with the real tool: the default locations, and that an absolute
+`CLAUDE_CONFIG_DIR` relocates `.claude.json` (docs/verification/windows.md, V02). Unverified: that
+it relocates `CLAUDE.md` and skills, and anything on Linux and macOS.]
 A relative `CLAUDE_CONFIG_DIR` is ignored (Claude would resolve it against its own working
 directory, which an adapter cannot know) and `detect` warns about it.
 
@@ -92,8 +93,16 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import ClassVar
 
-from .._core.mask import env_value_looks_secret, mask_args, mask_text
+from .._core.mask import (
+    SECRET_NAME,
+    env_value_looks_secret,
+    looks_like_credential,
+    mask_args,
+    mask_name,
+)
 from ..model import (
+    HEADER_SCHEME_PATTERN,
+    HEADER_SCHEME_RE,
     SOURCE_OVERRIDE,
     SOURCE_PATH,
     Conflict,
@@ -147,15 +156,36 @@ _OWNED_KEYS = frozenset({"type", "command", "args", "url", "env", "headers"})
 #: Characters a Windows `.cmd` / `.bat` shim cannot be trusted to pass through unchanged.
 _SHIM_UNSAFE = frozenset("%&|<>^!\r\n")
 
-_VAR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9._-]*$")
-_HEADER_NAME = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
-_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
-_ENV_REF = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+_VAR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
+_SCHEME = HEADER_SCHEME_RE
+_HEADER_NAME = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+\Z")
+_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*\Z")
+_ENV_REF = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}\Z")
 _HEADER_REF = re.compile(
-    r"^(?:(?P<scheme>[A-Za-z][A-Za-z0-9._-]*) )?\$\{(?P<var>[A-Za-z_][A-Za-z0-9_]*)\}$"
+    rf"^(?:(?P<scheme>{HEADER_SCHEME_PATTERN}) )?\$\{{(?P<var>[A-Za-z_][A-Za-z0-9_]*)\}}\Z"
 )
 _HTTP_TYPES = frozenset({"http", "sse", "streamable-http"})
+
+
+def _credential_in_ref(match: re.Match) -> bool:
+    """Whether a header reference's scheme or variable name is itself a credential."""
+    return looks_like_credential(match["scheme"] or "") or looks_like_credential(match["var"])
+
+
+def _is_literal_header(value: object) -> bool:
+    """A header value that is not a variable reference (`init` and `plan_mcp` share this)."""
+    match = _HEADER_REF.match(value) if isinstance(value, str) else None
+    return not (match and not _credential_in_ref(match))
+
+
+def _has_literal_headers(entry: Mapping) -> bool:
+    """Whether the entry holds a header value that is not a variable reference."""
+    headers = entry.get("headers")
+    if headers is None:
+        return False
+    if not isinstance(headers, Mapping):
+        return True  # not an object: never read, so nothing of it is in the source
+    return any(_is_literal_header(v) or looks_like_credential(k) for k, v in headers.items())
 
 
 # -- paths -------------------------------------------------------------------------------------
@@ -309,15 +339,17 @@ def _fatal(server: McpServer) -> str | None:
         return "it has neither a command nor a url"
     for name in (*server.env_vars, *(h.env_var for h in server.headers)):
         if not _VAR.match(name):
-            return f"variable name {name!r} cannot be written as ${{NAME}}"
+            return f"variable name {mask_name(name)!r} cannot be written as ${{NAME}}"
     for key, value in server.env:
         if "${" in value:
-            return f"env {key} holds a ${{...}} that Claude Code would expand as a variable"
+            return (
+                f"env {mask_name(key)} holds a ${{...}} that Claude Code would expand as a variable"
+            )
     for header in server.headers:
         if not _HEADER_NAME.match(header.name):
-            return f"header name {header.name!r} is not a valid HTTP header name"
+            return f"header name {mask_name(header.name)!r} is not a valid HTTP header name"
         if header.scheme is not None and not _SCHEME.match(header.scheme):
-            return f"header scheme {header.scheme!r} cannot be written"
+            return f"header scheme {mask_name(header.scheme)!r} cannot be written"
     return None
 
 
@@ -378,7 +410,7 @@ def decode_server(name: str, entry: Mapping) -> McpServer:
         raw_headers = entry.get("headers")
         for key, value in raw_headers.items() if isinstance(raw_headers, dict) else ():
             match = _HEADER_REF.match(value) if isinstance(value, str) else None
-            if match:
+            if match and not looks_like_credential(key) and not _credential_in_ref(match):
                 headers.append(HeaderRef(str(key), match["var"], match["scheme"]))
         return McpServer(name=name, url=url, headers=tuple(headers))
     literals: list[tuple[str, str]] = []
@@ -389,7 +421,7 @@ def decode_server(name: str, entry: Mapping) -> McpServer:
             continue
         ref = _ENV_REF.match(value)
         if ref:
-            if ref.group(1) == key:
+            if ref.group(1) == key and not looks_like_credential(key):
                 passed.append(str(key))
             continue  # a reference to a variable of another name: not representable
         if "${" in value or env_value_looks_secret(key, value):
@@ -423,10 +455,10 @@ def _owned_view(entry: Mapping) -> dict:
     return {
         "type": _kind(entry),
         "command": _canon_command(entry.get("command")),
-        "args": entry.get("args") or [],
+        "args": [] if entry.get("args") is None else entry["args"],  # a bad value stays
         "url": entry.get("url"),
-        "env": entry.get("env") or {},
-        "headers": entry.get("headers") or {},
+        "env": {} if entry.get("env") is None else entry["env"],  # a bad value stays visible
+        "headers": {} if entry.get("headers") is None else entry["headers"],
     }
 
 
@@ -443,7 +475,10 @@ def _patched(old: Mapping, fresh: Mapping) -> dict:
     return new
 
 
-_REFERENCE_ONLY = re.compile(r"(?:[A-Za-z][A-Za-z0-9._-]* )?\$\{[^}]+\}")
+#: A plain `${NAME}` (no `${NAME:-fallback}`, whose fallback may be a literal secret).
+_REFERENCE_ONLY = re.compile(
+    rf"(?:(?P<scheme>{HEADER_SCHEME_PATTERN}) )?\$\{{(?P<var>[A-Za-z_][A-Za-z0-9_]*)\}}"
+)
 _CREDENTIAL_KEY = re.compile(r"(?i)authorization|cookie")
 
 
@@ -456,28 +491,69 @@ def _secret_field(node: object, path: tuple[str, ...] = ()) -> str | None:
     `Bearer ${NAME}`) is a name, not a secret. Only key names are returned, never a value.
     """
     key = path[-1] if path else ""
-    where = ".".join(path) or "(entry)"
+    where = ".".join(mask_name(part) for part in path) or "(entry)"  # a key may look secret
+    credential_key = bool(SECRET_NAME.search(key) or _CREDENTIAL_KEY.search(key))
+    if credential_key and node is not None and not isinstance(node, str):
+        return where  # a number or a structure under a credential key is a secret too
     if isinstance(node, str):
-        if _REFERENCE_ONLY.fullmatch(node):
-            return None
-        credential = _CREDENTIAL_KEY.search(key) and node.strip()
-        if env_value_looks_secret(key, node) or credential or mask_text(node) != node:
+        ref = _REFERENCE_ONLY.fullmatch(node)
+        in_headers = len(path) >= 2 and path[-2] == "headers"
+        if ref and (in_headers or not ref["scheme"]):
+            # a name, not a secret (a scheme word only in a header), unless a part is a credential
+            return where if _credential_in_ref(ref) else None
+        credential = _CREDENTIAL_KEY.search(key) and node  # as mask_json: any non-empty value
+        # env_value_looks_secret judges a JSON string field by field, any other text by pattern
+        if env_value_looks_secret(key, node) or credential:
             return where
         return None
     if isinstance(node, Mapping):
         for name, value in node.items():
+            if looks_like_credential(name):  # a key name that is itself a credential
+                return ".".join(mask_name(part) for part in (*path, str(name)))
             found = _secret_field(value, (*path, str(name)))
             if found:
                 return found
         return None
     if isinstance(node, (list, tuple)):
-        strings = [x for x in node if isinstance(x, str)]
+        # a number right after `--token` is judged like a string there
+        strings = [str(x) for x in node if isinstance(x, (str, int, float))]
         if strings and mask_args(strings) != strings:
             return where
+        for before, item in zip([None, *node], node, strict=False):
+            if (
+                isinstance(before, str)
+                and before.startswith("-")
+                and mask_args([before, "x"])[1] == "***"
+                and isinstance(item, (dict, list, tuple))
+            ):
+                return where  # a structure right after a secret flag
         for item in node:
             found = _secret_field(item, path)
             if found:
                 return found
+    return None
+
+
+def _unsafe_field(entry: Mapping) -> str | None:
+    """Why an owned entry cannot go through `claude mcp` (its old JSON reaches the inverse command
+    line and the journal): a secret-looking value, or any literal header, whatever its name."""
+    try:
+        found = _secret_field(entry)
+    except RecursionError:  # nested too deep to inspect: never sent out unread
+        return "(entry)"
+    if found:
+        return found
+    for key in ("headers", "env"):  # not an object: its value would go out unread
+        if entry.get(key) is not None and not isinstance(entry[key], Mapping):
+            return key
+    env = entry.get("env")
+    for name, value in env.items() if isinstance(env, Mapping) else ():
+        if not isinstance(value, str):  # a number under a secret name is still a secret
+            return f"env.{mask_name(name)}"
+    headers = entry.get("headers")
+    for name, value in headers.items() if isinstance(headers, Mapping) else ():
+        if _is_literal_header(value):
+            return f"headers.{mask_name(name)}"
     return None
 
 
@@ -587,37 +663,34 @@ class ClaudeCodeAdapter(ToolAdapter):
             if not isinstance(entry, Mapping):
                 continue
             raw_headers = entry.get("headers")
+            if raw_headers is not None and not isinstance(raw_headers, Mapping):
+                notes.append(ImportNote(tool=self.id, server=name, field="header", name="headers"))
             if isinstance(raw_headers, Mapping):
                 for key, value in sorted(raw_headers.items()):
-                    if isinstance(value, str):
-                        match = _HEADER_REF.match(value)
-                        if not match:
-                            notes.append(
-                                ImportNote(
-                                    tool=self.id,
-                                    server=name,
-                                    field="header",
-                                    name=str(key),
-                                )
-                            )
+                    if _is_literal_header(value) or looks_like_credential(key):
+                        notes.append(
+                            ImportNote(tool=self.id, server=name, field="header", name=str(key))
+                        )
             environment = entry.get("env")
+            if environment is not None and not isinstance(environment, Mapping):
+                notes.append(ImportNote(tool=self.id, server=name, field="env", name="env"))
             if isinstance(environment, Mapping):
                 for key, value in sorted(environment.items()):
                     if isinstance(value, str):
                         ref = _ENV_REF.match(value)
-                        if ref and ref.group(1) == key:
-                            continue
-                        if "${" in value:
-                            continue
-                        if env_value_looks_secret(str(key), value):
-                            notes.append(
-                                ImportNote(
-                                    tool=self.id,
-                                    server=name,
-                                    field="env",
-                                    name=str(key),
-                                )
-                            )
+                        if ref and ref.group(1) == key and not looks_like_credential(key):
+                            continue  # imported as env_vars
+                    # the same test `decode_server` drops an entry by (a non-string value too):
+                    # every dropped entry gets a note, so `init` never adopts a server it could
+                    # not import whole
+                    if (
+                        not isinstance(value, str)
+                        or "${" in value
+                        or env_value_looks_secret(str(key), value)
+                    ):
+                        notes.append(
+                            ImportNote(tool=self.id, server=name, field="env", name=str(key))
+                        )
         return notes
 
     def read_skills(self, env: Env, scope: Scope) -> list[SkillRef]:
@@ -657,7 +730,7 @@ class ClaudeCodeAdapter(ToolAdapter):
             return RunCli(
                 argv=[*cli, "add-json", name, _compact(entry), *scope_args],
                 inverse_argv=[*cli, "remove", name, *scope_args],
-                description=f"add MCP server {name} to Claude Code",
+                description=f"add MCP server {mask_name(name)} to Claude Code",
                 claims=(ItemRef(self.id, Kind.MCP, name),),
             )
 
@@ -665,11 +738,19 @@ class ClaudeCodeAdapter(ToolAdapter):
             return RunCli(
                 argv=[*cli, "remove", name, *scope_args],
                 inverse_argv=[*cli, "add-json", name, _compact(old), *scope_args],
-                description=f"{why} MCP server {name} in Claude Code",
+                description=f"{why} MCP server {mask_name(name)} in Claude Code",
                 releases=(ItemRef(self.id, Kind.MCP, name),) if release else (),
             )
 
         for name, server in desired.items():
+            existing = config.members.get(name)
+            if name not in owned and isinstance(existing, dict) and _has_literal_headers(existing):
+                reason = (
+                    "an MCP server with this name exists with literal headers and was not "
+                    "created by all-agents; left alone"
+                )
+                refused.append(Conflict(self.id, Kind.MCP, name, reason, path))
+                continue
             if not server.enabled:
                 disabled.add(name)
                 gaps.append(
@@ -685,6 +766,10 @@ class ClaudeCodeAdapter(ToolAdapter):
             if lost:
                 gaps.append(f"{name}: {', '.join(lost)} not stored")
             fresh = encode_server(server)
+            leaked = _secret_field(fresh)
+            if leaked:  # the new entry would put a secret on the command line: change nothing
+                refused.append(Conflict(self.id, Kind.MCP, name, _secret_reason(leaked), path))
+                continue
             if name not in config.members:
                 steps.append((name, [add_op(name, fresh)]))
                 continue
@@ -699,7 +784,7 @@ class ClaudeCodeAdapter(ToolAdapter):
                 reason = "an MCP server with this name exists and was not created by all-agents"
                 refused.append(Conflict(self.id, Kind.MCP, name, reason, path))
                 continue
-            leaked = _secret_field(old)
+            leaked = _unsafe_field(old)
             if leaked:
                 refused.append(Conflict(self.id, Kind.MCP, name, _secret_reason(leaked), path))
                 continue
@@ -720,7 +805,7 @@ class ClaudeCodeAdapter(ToolAdapter):
                 reason = "the owned entry cannot be removed safely through the CLI; left alone"
                 refused.append(Conflict(self.id, Kind.MCP, name, reason, path))
                 continue
-            leaked = _secret_field(old)
+            leaked = _unsafe_field(old)
             if leaked:
                 refused.append(Conflict(self.id, Kind.MCP, name, _secret_reason(leaked), path))
                 continue
@@ -755,7 +840,9 @@ class ClaudeCodeAdapter(ToolAdapter):
 
     # -- normalization -------------------------------------------------------------------------
 
-    def normalize_mcp(self, servers: Mapping[str, McpServer]) -> dict[str, McpServer]:
+    def normalize_mcp(
+        self, servers: Mapping[str, McpServer], env: Env | None = None
+    ) -> dict[str, McpServer]:
         """What `read_mcp` returns after `servers` were written (for writable servers).
 
         A server with `enabled=False` is not written, so it is not in the result. Lost for the
@@ -793,13 +880,14 @@ class ClaudeCodeAdapter(ToolAdapter):
             "is never read into the neutral model, and an owned entry that holds one is not "
             "removed or replaced (it would reach a command line and the journal): a conflict",
             "CLAUDE_CONFIG_DIR (absolute) moves CLAUDE.md, skills and .claude.json; a relative "
-            "value is ignored",
+            "value is ignored (relocation of .claude.json verified on Windows; the rest, and "
+            "Linux and macOS, unverified)",
             "Windows: npx, npm, pnpm and yarn are written as plain names, not .cmd (as in the "
             "prototype; unverified with a live tool); a claude.cmd shim is refused for arguments "
             "with % & | < > ^ !",
             "skills are linked into <config>/skills (Claude Code does not read ~/.agents/skills); "
             ".trash and synced are never touched",
-            "unverified: CLAUDE_CONFIG_DIR with a live tool, symlink-following for skills on "
+            "unverified: CLAUDE_CONFIG_DIR and symlink-following for skills on "
             "Linux and macOS; everything on macOS",
         ]
 

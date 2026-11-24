@@ -61,7 +61,8 @@ Ownership of an entry's keys: `command`, `args`, `url`, `env`, `env_vars`, `cwd`
 (a timeout the user added by hand to an owned server survives; the source saying nothing is "no
 opinion"). Every other key of the user's entry (`tool_timeout_sec`, `required`, `http_headers`,
 ...) is kept. "Equal" means equal on those keys with Codex's defaults filled in, so an equal entry
-of the user's is left alone.
+of the user's is left alone. An entry all-agents did not create that holds a literal
+`http_headers` is a `Conflict` instead (left alone; the value is never shown).
 
 What Codex cannot store is reported as `Unsupported` (never dropped silently): for an http server
 `command`, `args`, `env`, `env_vars`, `cwd`; for a stdio server `headers`. `auth` is documentation
@@ -87,7 +88,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from .._core import toml_edit
-from .._core.mask import env_value_looks_secret
+from .._core.mask import env_value_looks_secret, looks_like_credential, mask_name
 from ..model import (
     INSTRUCTIONS_KEY,
     Conflict,
@@ -150,10 +151,10 @@ _OWNED_KEYS = frozenset(
     }
 )
 
-_VAR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_HEADER_NAME = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
+_VAR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
+_HEADER_NAME = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+\Z")
 #: What `codex mcp add` accepts as a server name [docs: `validate_server_name`].
-_SERVER_NAME = re.compile(r"^[A-Za-z0-9_:@/.-]+$")
+_SERVER_NAME = re.compile(r"^[A-Za-z0-9_:@/.-]+\Z")
 
 
 # -- paths -------------------------------------------------------------------------------------
@@ -260,32 +261,48 @@ def _canon_server(server: McpServer) -> McpServer:
 def _fatal(name: str, server: McpServer) -> str | None:
     """Why this server cannot be written to Codex at all (None: it can)."""
     if not _SERVER_NAME.match(name):
-        return f"{name!r} is not a server name Codex accepts"
+        return f"{mask_name(name)!r} is not a server name Codex accepts"
     if not server.url and not server.command:
         return "it has neither a command nor a url"
     for var in server.env_vars:
         if not _VAR.match(var):
-            return f"variable name {var!r} is not a valid environment variable name"
+            return f"variable name {mask_name(var)!r} is not a valid environment variable name"
     seen: set[str] = set()
     for header in server.headers:
         if not _HEADER_NAME.match(header.name):
-            return f"header name {header.name!r} is not a valid HTTP header name"
+            return f"header name {mask_name(header.name)!r} is not a valid HTTP header name"
         if not _VAR.match(header.env_var):
-            return f"variable name {header.env_var!r} is not a valid environment variable name"
+            return (
+                f"variable name {mask_name(header.env_var)!r} is not a valid environment "
+                "variable name"
+            )
         if header.name.lower() in seen:
-            return f"header {header.name} appears twice"
+            return f"header {mask_name(header.name)} appears twice"
         seen.add(header.name.lower())
         authorization = header.name.lower() == "authorization"
         if header.scheme is not None and not (authorization and _bearer(header.scheme)):
             return (
                 "Codex reads a header from a variable only as the whole value or as "
-                f"`Authorization: Bearer <variable>` (header {header.name})"
+                f"`Authorization: Bearer ${{NAME}}` (header {mask_name(header.name)})"
             )
     return None
 
 
+def _timeout_fits(seconds: int | float) -> bool:
+    """Whether Codex can hold the timeout (read back as at most a signed 64-bit integer)."""
+    return seconds <= _MAX_SECONDS
+
+
 def _lost_fields(server: McpServer) -> list[str]:
     """Fields of a writable server that the Codex format has no place for."""
+    lost = _lost_by_transport(server)
+    timeout = server.startup_timeout_sec
+    if timeout is not None and not _timeout_fits(timeout):
+        lost.append("startup_timeout_sec (too large)")
+    return lost
+
+
+def _lost_by_transport(server: McpServer) -> list[str]:
     if server.url:
         return [
             f
@@ -325,20 +342,24 @@ def encode_server(server: McpServer, *, windows: bool) -> dict:
             entry["env"] = dict(server.env)
     if not server.enabled:
         entry["enabled"] = False
-    if server.startup_timeout_sec is not None:
+    if server.startup_timeout_sec is not None and _timeout_fits(server.startup_timeout_sec):
         entry["startup_timeout_sec"] = server.startup_timeout_sec
     return entry
+
+
+#: The largest TOML integer (a signed 64-bit value); a larger one is not imported.
+_MAX_SECONDS = 2**63 - 1
 
 
 def _seconds(value: object) -> int | None:
     """A timeout as the neutral model holds it: whole seconds (Codex also takes fractions)."""
     if isinstance(value, bool):
         return None
-    if isinstance(value, int):
-        return value
     if isinstance(value, float) and value.is_integer():
-        return int(value)
-    return None
+        value = int(value)
+    if isinstance(value, int) and 0 < value <= _MAX_SECONDS:
+        return value
+    return None  # not positive whole seconds in range: not imported, so `init` is not blocked
 
 
 def _names(value: object) -> list[str]:
@@ -370,11 +391,11 @@ def decode_server(name: str, entry: Mapping) -> McpServer:
     if isinstance(url, str) and url:
         headers = []
         bearer = entry.get("bearer_token_env_var")
-        if isinstance(bearer, str) and bearer:
+        if _valid_var(bearer):
             headers.append(HeaderRef("Authorization", bearer, "Bearer"))
         refs = entry.get("env_http_headers")
         for key, var in refs.items() if isinstance(refs, dict) else ():
-            if isinstance(var, str) and var:
+            if not _credential_ref(key, var):
                 headers.append(HeaderRef(str(key), var, None))
         return McpServer(
             name=name,
@@ -383,7 +404,7 @@ def decode_server(name: str, entry: Mapping) -> McpServer:
             enabled=enabled,
             startup_timeout_sec=timeout,
         )
-    passed = _names(entry.get("env_vars"))
+    passed = [n for n in _names(entry.get("env_vars")) if _valid_var(n)]
     literals: list[tuple[str, str]] = []
     env = entry.get("env")
     for key, value in env.items() if isinstance(env, dict) else ():
@@ -419,29 +440,103 @@ def _canon_entry(entry: Mapping, *, timeout: bool) -> dict:
         value = entry.get(key)
         return value if isinstance(value, str) and value else None
 
-    def table(key: str) -> dict:
+    def table(key: str) -> object:
         value = entry.get(key)
-        return dict(value) if isinstance(value, dict) else {}
+        if value is None:
+            return {}
+        return dict(value) if isinstance(value, dict) else value  # a bad value stays visible
 
     out = {
         "command": _canon_command(text("command")),
-        "args": _strings(entry.get("args")),
+        "args": _strings(entry.get("args")) if _list_or_none(entry.get("args")) else entry["args"],
         "url": text("url"),
         "cwd": text("cwd"),
         "env": table("env"),
-        "env_vars": _names(entry.get("env_vars")),
-        "enabled": entry.get("enabled") is not False,
+        "env_vars": _env_vars_view(entry.get("env_vars")),
+        "enabled": _switch(entry.get("enabled")),
         "bearer_token_env_var": text("bearer_token_env_var"),
         "env_http_headers": table("env_http_headers"),
     }
     if timeout:
-        out["startup_timeout_sec"] = entry.get("startup_timeout_sec")
+        raw = entry.get("startup_timeout_sec")
+        # a boolean is no timeout (`true == 1` in Python must not make it equal)
+        out["startup_timeout_sec"] = None if isinstance(raw, bool) else raw
     return out
+
+
+def _list_or_none(value: object) -> bool:
+    return value is None or isinstance(value, list)
+
+
+def _env_vars_view(value: object) -> object:
+    """`env_vars` as compared: the names read (an item the reader skips, such as a remote one, is
+    not compared; `plan_mcp` refuses to change an owned server that holds one, so it is never
+    lost); a value that is not a list stays as it is."""
+    if value is None:
+        return []
+    return [n for n in _names(value) if _valid_var(n)] if isinstance(value, list) else value
+
+
+def _read_item(item: object) -> bool:
+    """Whether `decode_server` reads this `env_vars` item (a local, valid, non-credential name)."""
+    names = _names([item])
+    return bool(names) and _valid_var(names[0])
+
+
+def _local_name(item: object) -> bool:
+    """Whether an `env_vars` item names a local variable (a string, or a table whose source is
+    local), as opposed to a remote-source table."""
+    if isinstance(item, str):
+        return True
+    return (
+        isinstance(item, dict)
+        and isinstance(item.get("name"), str)
+        and item.get("source") in (None, "local")
+    )
+
+
+def _skipped_env_vars(value: object) -> list:
+    """The `env_vars` items the reader does not read (a remote source, a malformed item, a name
+    that is not valid or is itself a credential)."""
+    return [i for i in value if not _read_item(i)] if isinstance(value, list) else []
+
+
+def _switch(value: object) -> object:
+    """`enabled` as compared: missing is True; a non-boolean stays distinct from both booleans."""
+    if value is None:
+        return True
+    return value if isinstance(value, bool) else ("not a boolean", value)
 
 
 def _same(old: Mapping, fresh: Mapping) -> bool:
     timeout = "startup_timeout_sec" in fresh
     return _canon_entry(old, timeout=timeout) == _canon_entry(fresh, timeout=timeout)
+
+
+def _valid_var(value: object) -> bool:
+    """A variable name Codex can read and the source can hold (not itself a credential)."""
+    return isinstance(value, str) and bool(_VAR.match(value)) and not looks_like_credential(value)
+
+
+def _credential_ref(header: object, var: object) -> bool:
+    """A header reference that is never read: a credential-shaped header name, or a variable that
+    is not a valid, non-credential name."""
+    return looks_like_credential(header) or not _valid_var(var)
+
+
+def _has_literal_headers(entry: Mapping) -> bool:
+    refs = entry.get("env_http_headers")
+    bearer = entry.get("bearer_token_env_var")
+    if refs is not None and not isinstance(refs, Mapping):
+        return True
+    if isinstance(refs, Mapping) and any(_credential_ref(k, v) for k, v in refs.items()):
+        return True
+    if bearer is not None and not _valid_var(bearer):
+        return True
+    headers = entry.get("http_headers")
+    if headers is None:
+        return False
+    return not isinstance(headers, Mapping) or bool(headers)
 
 
 def _patched(old: Mapping, fresh: Mapping) -> dict:
@@ -507,10 +602,12 @@ def _check_result(old_doc: dict, new_text: str, spec: _McpEdit) -> None:
     servers = new_doc.get("mcp_servers", {})
     for name, entry in spec.upserts:
         if servers.get(name) != entry:
-            raise ValueError(f"the edited Codex config does not hold the server {name!r}")
+            raise ValueError(
+                f"the edited Codex config does not hold the server {mask_name(name)!r}"
+            )
     for name in spec.removes:
         if name in servers:
-            raise ValueError(f"the edited Codex config still holds the server {name!r}")
+            raise ValueError(f"the edited Codex config still holds the server {mask_name(name)!r}")
 
 
 # -- the adapter ---------------------------------------------------------------------------------
@@ -599,6 +696,10 @@ class CodexAdapter(ToolAdapter):
             if not isinstance(entry, Mapping):
                 continue
             http_headers = entry.get("http_headers")
+            if http_headers is not None and not isinstance(http_headers, Mapping):
+                notes.append(
+                    ImportNote(tool=self.id, server=name, field="header", name="http_headers")
+                )
             if isinstance(http_headers, Mapping):
                 for key in sorted(http_headers.keys()):
                     notes.append(
@@ -609,20 +710,46 @@ class CodexAdapter(ToolAdapter):
                             name=str(key),
                         )
                     )
-            passed = _names(entry.get("env_vars"))
+            refs = entry.get("env_http_headers")
+            if refs is not None and not isinstance(refs, Mapping):
+                notes.append(
+                    ImportNote(tool=self.id, server=name, field="header", name="env_http_headers")
+                )
+            for key in sorted(refs) if isinstance(refs, Mapping) else ():
+                if _credential_ref(key, refs[key]):  # never read: a name is a credential
+                    notes.append(ImportNote(tool=self.id, server=name, field="header", name=key))
+            bearer = entry.get("bearer_token_env_var")
+            if bearer is not None and not _valid_var(bearer):
+                notes.append(
+                    ImportNote(tool=self.id, server=name, field="header", name="Authorization")
+                )
+            raw_vars = entry.get("env_vars")
+            if raw_vars is not None and not isinstance(raw_vars, list):
+                notes.append(ImportNote(tool=self.id, server=name, field="env", name="env_vars"))
+            passed = [n for n in _names(raw_vars) if _valid_var(n)]  # as decode_server
+            for i, item in enumerate(raw_vars if isinstance(raw_vars, list) else (), 1):
+                # what `decode_server` keeps of this item (a remote one: nothing); a note names it
+                # by position, since its text may be a secret
+                if not _read_item(item):
+                    notes.append(
+                        ImportNote(tool=self.id, server=name, field="env", name=f"env_vars[{i}]")
+                    )
             env_map = entry.get("env")
+            if env_map is not None and not isinstance(env_map, Mapping):
+                notes.append(ImportNote(tool=self.id, server=name, field="env", name="env"))
             if isinstance(env_map, Mapping):
                 for key, value in sorted(env_map.items()):
-                    if isinstance(value, str) and key not in passed:
-                        if env_value_looks_secret(str(key), value):
-                            notes.append(
-                                ImportNote(
-                                    tool=self.id,
-                                    server=name,
-                                    field="env",
-                                    name=str(key),
-                                )
-                            )
+                    # what `decode_server` drops gets a note: a non-string or secret-looking
+                    # value, and a literal that overrides a passed `env_vars` name (Codex applies
+                    # `env` after the inherited variables, so `sync` would lose that override)
+                    if (
+                        key in passed
+                        or not isinstance(value, str)
+                        or env_value_looks_secret(str(key), value)
+                    ):
+                        notes.append(
+                            ImportNote(tool=self.id, server=name, field="env", name=str(key))
+                        )
         return notes
 
     def read_skills(self, env: Env, scope: Scope) -> list[SkillRef]:
@@ -667,6 +794,14 @@ class CodexAdapter(ToolAdapter):
         upserts: list[tuple[str, dict]] = []
         claimed: list[str] = []
         for name, server in desired.items():
+            old = config.servers.get(name)
+            if name not in owned and isinstance(old, dict) and _has_literal_headers(old):
+                reason = (
+                    "an MCP server with this name exists with literal http_headers and was not "
+                    "created by all-agents; left alone"
+                )
+                ops.append(Conflict(self.id, Kind.MCP, name, reason, path))
+                continue
             fatal = _fatal(name, server)
             if fatal:
                 gaps.append(f"{name}: not written, {fatal}")
@@ -679,11 +814,28 @@ class CodexAdapter(ToolAdapter):
                 upserts.append((name, fresh))
                 claimed.append(name)
                 continue
-            old = config.servers[name]
+            if (
+                name not in owned
+                and isinstance(old, dict)
+                and any(_local_name(i) for i in _skipped_env_vars(old.get("env_vars")))
+            ):
+                reason = (
+                    "an MCP server with this name exists with an env_vars name that was not "
+                    "imported and was not created by all-agents; left alone"
+                )
+                ops.append(Conflict(self.id, Kind.MCP, name, reason, path))
+                continue
             if isinstance(old, dict) and _same(old, fresh):
                 continue  # already as wanted (an identical entry of the user's is left alone too)
             if name not in owned:
                 reason = "an MCP server with this name exists and was not created by all-agents"
+                ops.append(Conflict(self.id, Kind.MCP, name, reason, path))
+                continue
+            if isinstance(old, dict) and _skipped_env_vars(old.get("env_vars")):
+                reason = (
+                    "this server's env_vars hold entries all-agents cannot keep (for example a "
+                    "remote variable); change it by hand; left alone"
+                )
                 ops.append(Conflict(self.id, Kind.MCP, name, reason, path))
                 continue
             upserts.append((name, _patched(old, fresh) if isinstance(old, dict) else fresh))
@@ -721,7 +873,9 @@ class CodexAdapter(ToolAdapter):
 
     # -- normalization -------------------------------------------------------------------------
 
-    def normalize_mcp(self, servers: Mapping[str, McpServer]) -> dict[str, McpServer]:
+    def normalize_mcp(
+        self, servers: Mapping[str, McpServer], env: Env | None = None
+    ) -> dict[str, McpServer]:
         """What `read_mcp` returns after `servers` were written (for writable servers).
 
         Lost: `auth` (documentation only; nothing is written for it); for an http server also
@@ -732,6 +886,10 @@ class CodexAdapter(ToolAdapter):
         out = {}
         for name, server in servers.items():
             server = replace(_canon_server(server), auth=None)
+            timeout = server.startup_timeout_sec
+            if timeout is not None:
+                # the value read back: whole seconds within range, else nothing
+                server = replace(server, startup_timeout_sec=_seconds(timeout))
             if server.url:
                 server = replace(server, command=None, args=(), env=(), env_vars=(), cwd=None)
             else:
@@ -750,7 +908,7 @@ class CodexAdapter(ToolAdapter):
             "changed server table are lost, everything else is kept",
             "MCP: a remote server cannot carry command, args, env, env_vars or cwd; a local one "
             "cannot carry headers; a header is stored only as a whole variable or "
-            "Authorization: Bearer <variable>",
+            "Authorization: Bearer ${NAME}",
             "MCP: enabled and startup_timeout_sec are stored natively",
             "Windows: npx, npm, pnpm and yarn are written as .cmd (unverified with a live tool)",
             "unverified: symlink-following for skills on Linux and macOS; everything on macOS",

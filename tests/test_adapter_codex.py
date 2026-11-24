@@ -535,6 +535,101 @@ class McpPlanTests(Base):
         self.assertEqual(table["url"], "https://demo.example.test/mcp")
         self.assertEqual(table["http_headers"], {"X-Demo": "literal"})
 
+    def test_unowned_server_with_literal_http_headers_is_a_conflict_and_never_leaks_value(self):
+        from one_setup_all_agents.engine.plan import render_plan
+
+        secret = "FAKE-HDR-SECRET-codex-999"
+        path = self.write_config(
+            '[mcp_servers.demo-remote]\nurl = "https://demo.example.test/mcp"\n\n'
+            f'[mcp_servers.demo-remote.http_headers]\nAuthorization = "Bearer {secret}"\n'
+        )
+        before = path.read_bytes()
+        ops = self.plan_mcp({"demo-remote": self.remote()}, owned=())
+        self.assertEqual([type(o) for o in ops], [Conflict])
+        self.assertEqual(ops[0].key, "demo-remote")
+        plan = Plan(ops)
+        self.assertEqual(plan.executable, [])
+        self.assertNotIn(secret, ops[0].reason)
+        self.assertNotIn(secret, render_plan(plan))
+        self.applier.apply(plan)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_literal_http_headers_conflict_comes_before_an_unwritable_desired_server(self):
+        secret = "FAKE-HDR-SECRET-codex-basic"
+        self.write_config(
+            '[mcp_servers.demo-remote]\nurl = "https://demo.example.test/mcp"\n\n'
+            f'[mcp_servers.demo-remote.http_headers]\nAuthorization = "Basic {secret}"\n'
+        )
+        desired = McpServer(
+            "demo-remote",
+            url="https://demo.example.test/mcp",
+            headers=(HeaderRef("Authorization", "DEMO_CRED", "Basic"),),
+        )
+        ops = self.plan_mcp({"demo-remote": desired}, owned=())
+        self.assertEqual([type(o) for o in ops], [Conflict])
+        self.assertNotIn(secret, ops[0].reason)
+
+    def test_a_name_or_variable_ending_in_a_line_break_is_not_written_and_spares_the_rest(self):
+        url = "https://demo.example.test/mcp"
+        for bad in (
+            McpServer("bad", url=url, headers=(HeaderRef("X-Demo\n", "TOK"),)),
+            McpServer("bad\n", command="echo"),
+            McpServer("bad", command="echo", env_vars=("TOK\n",)),
+        ):
+            with self.subTest(bad=bad):
+                ops = self.plan_mcp({"good": self.stdio("good"), bad.name: bad}, owned=())
+                self.assertEqual([type(o) for o in ops], [EditFile, Unsupported])
+
+    def test_a_refusal_never_shows_a_credential_shaped_name(self):
+        token = " a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"  # padded: no valid name, but a credential
+        url = "https://demo.example.test/mcp"
+        for bad in (
+            McpServer("bad", url=url, headers=(HeaderRef(token, "TOK"),)),
+            McpServer("bad", command="echo", env_vars=(token,)),
+        ):
+            with self.subTest(bad=bad):
+                ops = self.plan_mcp({"bad": bad}, owned=())
+                reasons = [o.reason for o in ops if isinstance(o, Unsupported)]
+                self.assertTrue(reasons)
+                self.assertTrue(all(token.strip() not in r for r in reasons))
+
+    def test_normalize_gives_the_timeout_that_reading_back_returns(self):
+        for seconds, want in ((45, 45), (30.0, 30), (1.5, None), (2**63, None)):
+            with self.subTest(seconds=seconds):
+                servers = {"s": self.stdio("s", startup_timeout_sec=seconds)}
+                self.assertEqual(self.adapter.normalize_mcp(servers)["s"].startup_timeout_sec, want)
+
+    def test_a_boolean_startup_timeout_is_not_equal_to_one_second(self):
+        self.sync_mcp({"s": self.stdio("s")})
+        table = "[mcp_servers.s]\n"
+        self.write_config(self.text().replace(table, table + "startup_timeout_sec = true\n"))
+        self.assertIs(self.doc()["mcp_servers"]["s"]["startup_timeout_sec"], True)
+        desired = {"s": self.stdio("s", startup_timeout_sec=1)}
+        self.assertEqual([type(o) for o in self.plan_mcp(desired)], [EditFile])
+        self.sync_mcp(desired)
+        self.assertEqual(self.doc()["mcp_servers"]["s"]["startup_timeout_sec"], 1)
+        self.assertEqual(self.plan_mcp(desired), [])
+
+    def test_a_startup_timeout_above_a_toml_integer_is_reported_not_written(self):
+        desired = {"s": self.stdio("s", startup_timeout_sec=2**63)}
+        ops = self.plan_mcp(desired)
+        gaps = [o.reason for o in ops if isinstance(o, Unsupported)]
+        self.assertEqual(gaps, ["s: startup_timeout_sec (too large) not stored"])
+        self.sync_mcp(desired)
+        self.assertNotIn("startup_timeout_sec", self.doc()["mcp_servers"]["s"])
+        self.assertTrue(Plan(self.plan_mcp(desired)).is_empty)
+        self.assertIsNone(self.adapter.normalize_mcp(desired)["s"].startup_timeout_sec)
+
+    def test_a_startup_timeout_that_is_not_positive_whole_seconds_is_not_read(self):
+        for value in (0, -5, 0.0, 1.5, True, 2**63, 10**400):
+            with self.subTest(value=value):
+                entry = {"command": "c", "startup_timeout_sec": value}
+                self.assertIsNone(decode_server("n", entry).startup_timeout_sec)
+        self.assertEqual(
+            decode_server("n", {"command": "c", "startup_timeout_sec": 30.0}).startup_timeout_sec,
+            30,
+        )
+
     def test_a_server_name_with_dots_is_quoted_and_round_trips(self):
         self.sync_mcp({"demo.server@1": self.stdio("demo.server@1")})
         self.assertIn('[mcp_servers."demo.server@1"]', self.text())
@@ -706,6 +801,118 @@ class McpUnsupportedTests(Base):
         self.assertEqual(notes[0].server, "srv")
         self.assertEqual(notes[0].field, "env")
         self.assertEqual(notes[0].name, "TOKEN")
+
+    def test_a_non_string_env_value_gets_a_note(self):
+        self.write_config('[mcp_servers.srv]\ncommand = "c"\n[mcp_servers.srv.env]\nNUMBER = 7\n')
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual([(n.server, n.field, n.name) for n in notes], [("srv", "env", "NUMBER")])
+        self.assertEqual(self.adapter.read_mcp(self.env, G)["srv"].env, ())
+
+    def test_values_the_reader_cannot_use_get_a_note(self):
+        url = "https://demo.example.test/mcp"
+        cases = {
+            "bad var": 'command = "c"\nenv_vars = ["not-a-var"]\n',
+            "bad var list": 'command = "c"\nenv_vars = "TOK"\n',
+            "bad header var": 'url = "URL"\n[mcp_servers.s.env_http_headers]\nX-Demo = 12345\n',
+            "bad header table": 'url = "URL"\nenv_http_headers = ["X-Demo"]\n',
+            "bad bearer": 'url = "URL"\nbearer_token_env_var = 12345\n',
+        }
+        for label, body in cases.items():
+            with self.subTest(label):
+                self.write_config("[mcp_servers.s]\n" + body.replace("URL", url))
+                self.assertEqual(len(self.adapter.import_notes(self.env, G)), 1)
+
+    def test_a_rejected_env_vars_entry_is_named_by_position_never_by_its_text(self):
+        padded = "  a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"
+        self.write_config('[mcp_servers.s]\ncommand = "c"\nenv_vars = ["OK", "' + padded + '"]\n')
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual([n.name for n in notes], ["env_vars[2]"])
+        from one_setup_all_agents.model import ImportNote
+
+        self.assertEqual(ImportNote("codex", "s", "env", padded).name, "***")
+
+    def test_an_env_vars_item_the_reader_skips_gets_a_note_and_is_never_lost(self):
+        self.write_config(
+            '[mcp_servers.srv]\ncommand = "demo-cmd"\n'
+            'env_vars = ["OK", { name = "REMOTE_KEY", source = "remote" }]\n'
+        )
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual([n.name for n in notes], ["env_vars[2]"])
+        desired = {"srv": self.stdio("srv", env_vars=("OK",))}
+        self.assertEqual(self.plan_mcp(desired, owned=("srv",)), [])  # the remote item is not drift
+        changed = {"srv": self.stdio("srv", args=("--flag",), env_vars=("OK",))}
+        ops = self.plan_mcp(changed, owned=("srv",))  # a change would drop the remote item
+        self.assertEqual([type(o) for o in ops], [Conflict])
+
+    def test_an_invalid_env_vars_name_is_never_dropped_by_an_edit(self):
+        self.write_config('[mcp_servers.srv]\ncommand = "demo-cmd"\nenv_vars = ["OK", "BAD-NAME"]\n')
+        changed = {"srv": self.stdio("srv", command="other", env_vars=("OK",))}
+        self.assertEqual([type(o) for o in self.plan_mcp(changed, owned=("srv",))], [Conflict])
+
+    def test_an_unowned_server_with_an_env_vars_name_not_imported_is_a_conflict(self):
+        self.write_config('[mcp_servers.srv]\ncommand = "demo-cmd"\nenv_vars = ["OK", "BAD-NAME"]\n')
+        desired = {"srv": self.stdio("srv", env_vars=("OK",))}
+        self.assertEqual([type(o) for o in self.plan_mcp(desired, owned=())], [Conflict])
+
+    def test_an_unowned_local_table_name_not_imported_is_a_conflict(self):
+        self.write_config(
+            '[mcp_servers.srv]\ncommand = "demo-cmd"\n'
+            'env_vars = [{ name = "BAD-NAME", source = "local" }]\n'
+        )
+        desired = {"srv": self.stdio("srv")}
+        self.assertEqual([type(o) for o in self.plan_mcp(desired, owned=())], [Conflict])
+
+    def test_an_env_literal_that_is_imported_gets_no_note(self):
+        self.write_config(
+            '[mcp_servers.demo]\ncommand = "npx"\nenv_vars = ["bad-var"]\n'
+            '[mcp_servers.demo.env]\n"bad-var" = "hello"\n'
+        )
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual([n.name for n in notes], ["env_vars[1]"])
+        self.assertEqual(self.adapter.read_mcp(self.env, G)["demo"].env, (("bad-var", "hello"),))
+
+    def test_bad_switch_args_and_env_vars_are_never_taken_for_defaults(self):
+        for body in ("enabled = 0", 'args = "not-a-list"', 'env_vars = "TOK"'):
+            with self.subTest(body=body):
+                self.write_config('[mcp_servers.srv]\ncommand = "demo-cmd"\n' + body + "\n")
+                ops = self.plan_mcp({"srv": self.stdio("srv")}, owned=())
+                self.assertEqual([type(o) for o in ops], [Conflict])
+
+    def test_a_bad_env_value_is_never_taken_for_an_empty_one(self):
+        for env in ('"not-a-table"', '["a"]', "123", "false"):
+            with self.subTest(env=env):
+                self.write_config('[mcp_servers.srv]' + chr(10) + 'command = "demo-cmd"' + chr(10)
+                                  + "env = " + env + chr(10))
+                ops = self.plan_mcp({"srv": self.stdio("srv")}, owned=())
+                self.assertEqual([type(o) for o in ops], [Conflict])
+
+    def test_credential_shaped_variable_and_header_names_are_never_imported(self):
+        key = "ghp_" + "d1" * 12
+        self.write_config(
+            '[mcp_servers.r]' + '\n' + 'url = "https://demo.example.test/mcp"' + '\n'
+            + 'bearer_token_env_var = "' + key + '"' + '\n'
+            + '[mcp_servers.r.env_http_headers]' + '\n' + key + ' = "TOKEN"' + '\n'
+            + '[mcp_servers.s]' + '\n' + 'command = "c"' + '\n' + 'env_vars = ["' + key + '"]' + '\n'
+        )
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual(sorted((n.server, n.field) for n in notes),
+                         [("r", "header"), ("r", "header"), ("s", "env")])
+        self.assertTrue(all(key not in n.name for n in notes))
+        read = self.adapter.read_mcp(self.env, G)
+        self.assertEqual((read["r"].headers, read["s"].env_vars), ((), ()))
+        desired = McpServer(
+            "r", url="https://demo.example.test/mcp",
+            headers=(HeaderRef("Authorization", "DEMO_CRED", "Basic"),),
+        )
+        self.assertEqual([type(o) for o in self.plan_mcp({"r": desired}, owned=())], [Conflict])
+
+    def test_a_literal_that_overrides_a_passed_variable_gets_a_note(self):
+        self.write_config(
+            '[mcp_servers.srv]\ncommand = "c"\nenv_vars = ["DEMO_TOKEN"]\n'
+            '[mcp_servers.srv.env]\nDEMO_TOKEN = "override"\n'
+        )
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual([(n.server, n.field, n.name) for n in notes], [("srv", "env", "DEMO_TOKEN")])
 
 
 class UnreadableConfigTests(Base):

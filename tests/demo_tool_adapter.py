@@ -116,7 +116,9 @@ class DemoToolAdapter(ToolAdapter):
     ) -> list[Op]:
         return plan_skill_links(self.id, self.paths(env, scope).skills_dir, desired, owned)
 
-    def normalize_mcp(self, servers: Mapping[str, McpServer]) -> dict[str, McpServer]:
+    def normalize_mcp(
+        self, servers: Mapping[str, McpServer], env: Env | None = None
+    ) -> dict[str, McpServer]:
         return {n: replace(s, startup_timeout_sec=None) for n, s in servers.items()}
 
     def _edit(self, path: Path, old: bytes | None, upserts: dict, removals: list) -> EditFile:

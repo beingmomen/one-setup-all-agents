@@ -178,7 +178,9 @@ class ExampleAdapter(ToolAdapter):
 
     # -- normalization: this tool has no startup timeout --------------------------------
 
-    def normalize_mcp(self, servers: Mapping[str, McpServer]) -> dict[str, McpServer]:
+    def normalize_mcp(
+        self, servers: Mapping[str, McpServer], env: Env | None = None
+    ) -> dict[str, McpServer]:
         return {n: replace(s, startup_timeout_sec=None) for n, s in servers.items()}
 
     # -- the file format ----------------------------------------------------------------

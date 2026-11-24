@@ -18,7 +18,15 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .._core.mask import ENV_REF, MASK, SECRET_NAME, mask_args, mask_text
+from .._core.mask import (
+    MASK,
+    loads_strict,
+    mask_args,
+    mask_fallbacks,
+    mask_json,
+    mask_name,
+    mask_text,
+)
 from ..adapters.base import ToolAdapter
 from ..model import (
     Conflict,
@@ -92,10 +100,58 @@ def _plan_kind(
 
 
 def runcli_has_secret(op: RunCli) -> bool:
-    """Return True if op.argv or op.inverse_argv changes under mask_args."""
-    argv_list = list(op.argv)
-    inv_list = list(op.inverse_argv)
-    return mask_args(argv_list) != argv_list or mask_args(inv_list) != inv_list
+    """Return True if op.argv or op.inverse_argv changes under masking (a JSON argument is
+    judged field by field, never by patterns that could match across its delimiters)."""
+    return any(
+        _mask_argv(argv) != [_canonical(a) for a in argv] for argv in (op.argv, op.inverse_argv)
+    )
+
+
+def _refused_runcli(ops: Sequence[Op], i: int, tool: str, kind: Kind) -> tuple[tuple, Conflict]:
+    """The Conflict for a held-back command. A command without a claim (the remove half of a
+    replacement) is keyed by the next command that has one, so a server gets one conflict."""
+    op = ops[i]
+    ref = next(iter(op.claims + op.releases), None)
+    for later in ops[i + 1 :]:
+        if ref is not None:
+            break
+        if isinstance(later, RunCli):
+            ref = next(iter(later.claims + later.releases), None)
+    item = mask_name(ref.key) if ref else mask_text(op.description)
+    reason = (
+        secret_conflict_reason(item)
+        if runcli_has_secret(op)
+        else "not run: another command for this tool in the same plan holds a secret-looking "
+        "value; fix that one first"
+    )
+    identity = (ref.tool, ref.kind, ref.key) if ref else (tool, kind, op.description)
+    conflict = Conflict(
+        tool=ref.tool if ref else tool, kind=ref.kind if ref else kind, key=item, reason=reason
+    )
+    return identity, conflict
+
+
+def _hold_back(planned_ops: Sequence[Op], tool: str, kind: Kind) -> list[Op]:
+    """Replace every command of one tool and kind with a Conflict, keeping the other ops.
+
+    A replacement is a remove plus an add, and running only the remove would delete the
+    server, so all of them are held back. One Conflict per server (by its original name, not
+    the masked one); the direct secret reason wins over "not run".
+    """
+    out: list[Op] = []
+    slot: dict[tuple, int] = {}  # original identity -> index of its Conflict in `out`
+    for i, op in enumerate(planned_ops):
+        if not isinstance(op, RunCli):
+            out.append(op)
+            continue
+        where, conflict = _refused_runcli(planned_ops, i, tool, kind)
+        at = slot.get(where)
+        if at is None:
+            slot[where] = len(out)
+            out.append(conflict)
+        elif out[at].reason.startswith("not run") and not conflict.reason.startswith("not run"):
+            out[at] = conflict
+    return out
 
 
 def secret_conflict_reason(item: str) -> str:
@@ -141,20 +197,9 @@ def build_plan(
                 continue
             owned = journal.owned_for(env.state_dir, adapter.id, kind.value)
             planned_ops = _plan_kind(adapter, env, scope, kind, state, owned)
-            for op in planned_ops:
-                if isinstance(op, RunCli) and runcli_has_secret(op):
-                    ref = next(iter(op.claims + op.releases), None)
-                    item = ref.key if ref else mask_text(op.description)
-                    ops.append(
-                        Conflict(
-                            tool=ref.tool if ref else adapter.id,
-                            kind=ref.kind if ref else kind,
-                            key=item,
-                            reason=secret_conflict_reason(item),
-                        )
-                    )
-                    continue
-                ops.append(op)
+            if any(isinstance(op, RunCli) and runcli_has_secret(op) for op in planned_ops):
+                planned_ops = _hold_back(planned_ops, adapter.id, kind)
+            ops.extend(planned_ops)
             if kind is Kind.SKILLS:
                 for want in adapter.wanted_links(env, scope, state.skills):
                     wanted_links.setdefault(_norm(want.link), []).append(want)
@@ -290,33 +335,48 @@ def merge_links(
 # -- rendering -----------------------------------------------------------------------------------
 
 
-def _mask_json(value, key: str | None = None):
-    if isinstance(value, str):
-        if key is not None and SECRET_NAME.search(key) and not ENV_REF.match(value.strip()):
-            return MASK
-        return mask_text(value)
-    if isinstance(value, list):
-        if all(isinstance(v, str) for v in value):
-            return mask_args(value)
-        return [_mask_json(v) for v in value]
-    if isinstance(value, dict):
-        return {k: _mask_json(v, k) for k, v in value.items()}
-    return value
+_mask_json = mask_json
 
 
-def _mask_arg(arg: str) -> str:
-    """Mask one argv entry; a JSON document is masked field by field first."""
-    text = arg.strip()
+def _json_arg(arg: str) -> object:
+    """The parsed JSON document an argument holds, or None."""
+    text = str(arg).strip()
     if text[:1] in ("{", "["):
         try:
-            return mask_text(json.dumps(_mask_json(json.loads(text)), sort_keys=True))
-        except ValueError:
-            pass
-    return mask_text(arg)
+            return loads_strict(text)  # a key written twice: not parsed, so it is masked whole
+        except (ValueError, RecursionError):
+            return None  # judged as text by mask_args, which masks what it cannot inspect
+    return None
+
+
+def _canonical(arg: str) -> str:
+    """An argument as `_mask_argv` prints it when nothing is masked."""
+    doc = _json_arg(arg)
+    return str(arg) if doc is None else json.dumps(doc, sort_keys=True)
+
+
+def _mask_argv(argv: Sequence[str]) -> list[str]:
+    """Mask a command line: a JSON argument field by field, every other one with `mask_args`
+    (so a value after a secret flag is masked too, a JSON one included)."""
+    args = [str(a) for a in argv]
+    docs = [_json_arg(a) for a in args]
+    plain = mask_args(["{}" if d is not None else a for a, d in zip(args, docs, strict=True)])
+    out = []
+    for doc, masked in zip(docs, plain, strict=True):
+        if doc is None:
+            out.append(masked)
+        elif masked == MASK:  # a JSON value right after a secret flag
+            out.append(MASK)
+        else:
+            try:
+                out.append(json.dumps(_mask_json(doc), sort_keys=True))
+            except RecursionError:
+                out.append(MASK)
+    return out
 
 
 def _argv(argv: Sequence[str]) -> str:
-    return shlex.join(_mask_arg(a) for a in mask_args(list(argv)))
+    return shlex.join(_mask_argv(argv))
 
 
 def _describe(op: Op, number: int) -> str:
@@ -357,11 +417,13 @@ def render_plan(plan: Plan) -> str:
         lines.append("Conflicts (left alone, not changed):")
         for op in conflicts:
             where = f" at {op.path}" if op.path else ""
-            lines.append(f"  - {op.tool} {op.kind.value} '{op.key}'{where}: {op.reason}")
+            key = mask_name(op.key)  # a server name may itself be a credential
+            lines.append(f"  - {op.tool} {op.kind.value} '{key}'{where}: {op.reason}")
     if unsupported:
         lines.append("Not supported by the tool (shown so the gap is visible):")
         lines.extend(f"  - {op.tool} {op.kind.value}: {op.reason}" for op in unsupported)
     if not (executable or conflicts):
         lines.append("Nothing to do.")
-    text = "\n".join(lines)
+    # each entry on its own: a stray quote in one entry can never hide the entries after it
+    text = "\n".join(mask_fallbacks(line) for line in lines)
     return "\n".join(mask_text(line) for line in text.split("\n")) + "\n"

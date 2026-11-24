@@ -513,6 +513,49 @@ class McpPlanTests(Base):
         self.assertFalse(Plan(ops).is_empty)
         self.assertEqual(Plan(ops).executable, [])
 
+    def test_unowned_server_with_literal_header_is_a_conflict_and_never_leaks_value(self):
+        from one_setup_all_agents.engine.plan import render_plan
+
+        secret = "FAKE-HDR-SECRET-claude-999"
+        self.write_state(
+            {
+                "mcpServers": {
+                    "demo-remote": {
+                        "type": "http",
+                        "url": "https://demo.example.test/mcp",
+                        "headers": {"Authorization": f"Bearer {secret}"},
+                    }
+                }
+            }
+        )
+        before = self.state_file.read_bytes()
+        ops = self.plan_mcp(
+            {"demo-remote": McpServer(name="demo-remote", url="https://demo.example.test/mcp")},
+            owned=(),
+        )
+        self.assertEqual([type(o) for o in ops], [Conflict])
+        self.assertEqual(ops[0].key, "demo-remote")
+        plan = Plan(ops)
+        self.assertEqual(plan.executable, [])
+        self.assertNotIn(secret, ops[0].reason)
+        self.assertNotIn(secret, render_plan(plan))
+        self.applier.apply(plan)
+        self.assertEqual(self.state_file.read_bytes(), before)
+
+    def test_literal_header_conflict_comes_before_disabled_and_unwritable_servers(self):
+        url = "https://demo.example.test/mcp"
+        entry = {"type": "http", "url": url, "headers": {"Authorization": "Bearer FAKE-literal"}}
+        self.write_state({"mcpServers": {"demo-remote": entry}})
+        for desired in (
+            McpServer(name="demo-remote", url=url, enabled=False),
+            McpServer(
+                name="demo-remote", url=url, headers=(HeaderRef("Bad Header", "DEMO_TOKEN"),)
+            ),
+        ):
+            with self.subTest(desired=desired):
+                ops = self.plan_mcp({"demo-remote": desired}, owned=())
+                self.assertEqual([type(o) for o in ops], [Conflict])
+
     def test_an_equal_unowned_entry_is_left_alone_even_with_other_bytes(self):
         # no "type", extra keys, a .cmd launcher shim and defaults left out: same meaning
         self.write_state(
@@ -755,6 +798,78 @@ class DisabledServerTests(Base):
         self.assertEqual(notes[0].field, "env")
         self.assertEqual(notes[0].name, "TOKEN")
 
+    def test_a_header_reference_with_a_trailing_line_break_is_literal(self):
+        url = "https://demo.example.test/mcp"
+        entry = {"type": "http", "url": url, "headers": {"X-Demo": "Bearer ${TOKEN}\n"}}
+        self.write_state({"mcpServers": {"demo": entry}})
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual([(n.server, n.field) for n in notes], [("demo", "header")])
+        self.assertEqual(self.adapter.read_mcp(self.env, G)["demo"].headers, ())
+
+    def test_every_env_entry_that_is_not_imported_gets_a_note(self):
+        env = {
+            "SAME": "${SAME}",
+            "DB_PASSWORD": "${DB_PASSWORD:-FAKE-FALLBACK}",
+            "LOG_LEVEL": "${LOG_LEVEL:-info}",
+            "NUMBER": 7,
+            "MODE": "plain",
+        }
+        self.write_state({"mcpServers": {"demo": {"command": "c", "env": env}}})
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual(sorted(n.name for n in notes), ["DB_PASSWORD", "LOG_LEVEL", "NUMBER"])
+        server = self.adapter.read_mcp(self.env, G)["demo"]
+        self.assertEqual((server.env_vars, server.env), (("SAME",), (("MODE", "plain"),)))
+
+    def test_bad_args_are_never_taken_for_an_empty_list(self):
+        for args in (False, "", 0, {}):
+            with self.subTest(args=args):
+                self.write_state({"mcpServers": {"demo": {"command": "demo-cmd", "args": args}}})
+                ops = self.plan_mcp({"demo": self.stdio("demo")}, owned=())
+                self.assertEqual([type(o) for o in ops], [Conflict])
+
+    def test_a_bad_env_value_is_never_taken_for_an_empty_one(self):
+        for env in ([], "", 0, False):
+            with self.subTest(env=env):
+                self.write_state({"mcpServers": {"demo": {"command": "demo-cmd", "env": env}}})
+                ops = self.plan_mcp({"demo": self.stdio("demo")}, owned=())
+                self.assertEqual([type(o) for o in ops], [Conflict])
+
+    def test_a_header_name_that_is_a_credential_is_dropped_noted_and_literal(self):
+        key = "ghp_" + "f6" * 12
+        url = "https://demo.example.test/mcp"
+        entry = {"type": "http", "url": url, "headers": {key: "${TOKEN}"}}
+        self.write_state({"mcpServers": {"demo": entry}})
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual([n.field for n in notes], ["header"])
+        self.assertNotIn(key, notes[0].name)
+        self.assertEqual(self.adapter.read_mcp(self.env, G)["demo"].headers, ())
+        ops = self.plan_mcp({"demo": McpServer(name="demo", url=url)}, owned=())
+        self.assertEqual([type(o) for o in ops], [Conflict])
+
+    def test_a_header_referencing_a_credential_variable_name_is_literal(self):
+        key = "ghp_" + "c9" * 12
+        url = "https://demo.example.test/mcp"
+        entry = {"type": "http", "url": url, "headers": {"Authorization": "Bearer ${" + key + "}"}}
+        self.write_state({"mcpServers": {"demo": entry}})
+        self.assertEqual([n.field for n in self.adapter.import_notes(self.env, G)], ["header"])
+        self.assertEqual(self.adapter.read_mcp(self.env, G)["demo"].headers, ())
+        ops = self.plan_mcp({"demo": McpServer(name="demo", url=url)}, owned=())
+        self.assertEqual([type(o) for o in ops], [Conflict])
+
+    def test_an_env_that_is_not_an_object_gets_a_note(self):
+        self.write_state({"mcpServers": {"demo": {"command": "c", "env": ["x"]}}})
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual([(n.field, n.name) for n in notes], [("env", "env")])
+
+    def test_a_non_string_header_is_literal_for_import_and_plan_alike(self):
+        url = "https://demo.example.test/mcp"
+        entry = {"type": "http", "url": url, "headers": {"Authorization": [1234]}}
+        self.write_state({"mcpServers": {"demo": entry}})
+        notes = self.adapter.import_notes(self.env, G)
+        self.assertEqual([(n.server, n.field) for n in notes], [("demo", "header")])
+        ops = self.plan_mcp({"demo": McpServer(name="demo", url=url)}, owned=())
+        self.assertEqual([type(o) for o in ops], [Conflict])
+
 
 class UnreadableConfigTests(Base):
     def test_syntax_errors_are_refused_not_overwritten(self):
@@ -849,6 +964,44 @@ class SecretInOwnedEntryTests(Base):
             "command": "demo-cmd",
             "args": ["--token", "FAKE-LITERAL-zq81"],
         },
+        "env fallback after a variable": {
+            "command": "demo-cmd",
+            "env": {"DB_PASSWORD": "${DB_PASSWORD:-FAKE-LITERAL-zq81}"},
+        },
+        "env fallback under a plain name": {
+            "command": "demo-cmd",
+            "env": {"UPSTREAM": "${UPSTREAM_TOKEN:-FAKE-LITERAL-zq81}"},
+        },
+        "headers that are not an object": {
+            "type": "http",
+            "url": "https://x.example.test/mcp",
+            "headers": "FAKE-LITERAL-zq81",
+        },
+        "env that is not an object": {"command": "demo-cmd", "env": ["FAKE-LITERAL-zq81"]},
+        "number under a secret env name": {"command": "demo-cmd", "env": {"API_KEY": 987654321}},
+        "number under a credential key": {"command": "demo-cmd", "extra": {"access_token": 12345}},
+        "number after a secret flag": {"command": "demo-cmd", "args": ["--api-key", 12345]},
+        "literal before a reference outside headers": {
+            "command": "demo-cmd",
+            "env": {"API_TOKEN": "FAKE-LITERAL-zq81 ${FOO}"},
+        },
+        "structure after a secret flag": {
+            "command": "demo-cmd",
+            "extra": ["--token", {"v": "FAKE-LITERAL-zq81"}],
+        },
+        "structure under a cookie key": {
+            "command": "demo-cmd",
+            "extra": {"cookie": {"sid": "FAKE-LITERAL-zq81"}},
+        },
+        "credential used as a variable name": {
+            "command": "demo-cmd",
+            "env": {"API_KEY": "${a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6}"},
+        },
+        "short literal under a custom header name": {
+            "type": "http",
+            "url": "https://x.example.test/mcp",
+            "headers": {"X-Demo": "FAKE-LITERAL-zq81"},
+        },
     }
 
     def check_refused(self, ops, label):
@@ -875,10 +1028,68 @@ class SecretInOwnedEntryTests(Base):
                 self.own(entry)
                 self.check_refused(self.plan_mcp({}), label)
 
+    def test_a_clean_json_value_is_not_taken_for_a_secret(self):
+        clean = '{"url":"https://demo.example.test:3000","pkg":"@scope/demo-server"}'
+        self.own({"command": "demo-cmd"})
+        desired = {
+            "demo-server": self.stdio(args=("--config", clean), env=(("APP_CONFIG", clean),))
+        }
+        ops = self.plan_mcp(desired)
+        self.assertNotIn(Conflict, [type(o) for o in ops])
+
+    def test_an_entry_nested_too_deep_to_inspect_is_unsafe(self):
+        from one_setup_all_agents.adapters.claude_code import _unsafe_field
+
+        nested: list = []
+        for _ in range(5000):
+            nested = [nested]
+        self.assertEqual(_unsafe_field({"command": "demo-cmd", "extra": nested}), "(entry)")
+
+    def test_a_credential_shaped_name_never_reaches_a_command_description(self):
+        name = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"
+        ops = self.plan_mcp({name: self.stdio(name=name)}, owned=())
+        self.assertTrue(self.clis(ops))
+        self.assertTrue(all(name not in op.description for op in self.clis(ops)))
+
+    def test_a_new_entry_with_a_secret_changes_nothing_and_keeps_the_server(self):
+        self.own({"command": "demo-cmd"})
+        desired = {"demo-server": self.stdio(args=('{"api_key":"demo-value"}',))}
+        ops = self.plan_mcp(desired)
+        self.assertEqual([type(o) for o in ops], [Conflict])
+        self.assertNotIn("demo-value", ops[0].reason)
+
     def test_the_refusal_names_the_field_and_not_the_value(self):
         self.own(self.CASES["nested oauth"])
         reason = self.plan_mcp({})[0].reason
         self.assertIn("oauth.nested.clientSecret", reason)
+
+    def test_a_padded_credential_key_is_refused_and_masked(self):
+        from one_setup_all_agents.engine.plan import render_plan
+
+        key = " a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6 "
+        url = "https://x.example.test/mcp"
+        for value in ("Bearer ${TOKEN}", "literal"):
+            with self.subTest(value=value):
+                self.setUp()
+                self.own({"type": "http", "url": url, "headers": {key: value}})
+                ops = self.plan_mcp({})
+                self.assertEqual([type(o) for o in ops], [Conflict])
+                self.assertNotIn(key.strip(), render_plan(Plan(ops)))
+
+    def test_a_header_name_that_looks_like_a_secret_is_masked_in_the_refusal(self):
+        from one_setup_all_agents.engine.plan import render_plan
+
+        key = "ghp_" + "b2" * 12
+        url = "https://x.example.test/mcp"
+        for value in ("Bearer FAKE-LITERAL-zq81", "short", "${HEADER}"):
+            with self.subTest(value=value):
+                self.setUp()
+                self.own({"type": "http", "url": url, "headers": {key: value}})
+                replace = self.plan_mcp({"demo-server": self.stdio(args=("--new",))})
+                for ops in (self.plan_mcp({}), replace):
+                    self.assertEqual([type(o) for o in ops], [Conflict])
+                    self.assertNotIn(key, ops[0].reason)
+                    self.assertNotIn(key, render_plan(Plan(ops)))
 
     def test_references_are_names_not_secrets_and_still_allowed(self):
         entry = {
@@ -1002,6 +1213,8 @@ class SkillTests(Base):
 
 class NotesAndFixtureTests(unittest.TestCase):
     def test_declares_the_three_v01_kinds_and_states_its_limits(self):
+        import one_setup_all_agents.adapters.claude_code as claude_mod
+
         adapter = ClaudeCodeAdapter()
         self.assertEqual(adapter.capabilities, {Kind.INSTRUCTIONS, Kind.MCP, Kind.SKILLS})
         text = " ".join(adapter.notes())
@@ -1010,11 +1223,16 @@ class NotesAndFixtureTests(unittest.TestCase):
             BIN_ENV,
             "${NAME}",
             "CLAUDE_CONFIG_DIR",
+            "relocation of .claude.json verified on Windows",
             ".cmd",
             "RunCli has no drift check",
             "unverified",
         ):
             self.assertIn(word, text)
+        self.assertNotIn("CLAUDE_CONFIG_DIR with a live tool", text)
+        self.assertIn("Verified on Windows", claude_mod.__doc__)
+        self.assertIn("relocates `.claude.json`", claude_mod.__doc__)
+        self.assertNotIn("UNVERIFIED with a live tool", claude_mod.__doc__)
 
     def test_the_fixture_is_neutral_json(self):
         doc = json.loads(FIXTURE.read_text("utf-8"))

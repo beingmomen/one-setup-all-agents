@@ -417,6 +417,145 @@ class McpPlanTests(Base):
         self.assertEqual(entry["authProviderType"], "google_credentials")
         self.assertEqual(entry["headers"], {"X-A": "b"})
 
+    def test_unowned_server_with_literal_headers_is_a_conflict_and_never_leaks_value(self):
+        from one_setup_all_agents.engine.plan import render_plan
+
+        secret = "FAKE-HDR-SECRET-agy-999"
+        self.write(
+            self.mcp_file,
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "demo-remote": {
+                            "serverUrl": "https://demo.example.test/mcp",
+                            "headers": {"Authorization": f"Bearer {secret}"},
+                        }
+                    }
+                },
+                indent=2,
+            )
+            + "\n",
+        )
+        before = self.mcp_file.read_bytes()
+        ops = self.plan_mcp(
+            {"demo-remote": McpServer("demo-remote", url="https://demo.example.test/mcp")},
+            owned=(),
+        )
+        self.assertEqual([type(o) for o in ops], [Conflict])
+        self.assertEqual(ops[0].key, "demo-remote")
+        plan = Plan(ops)
+        self.assertEqual(plan.executable, [])
+        self.assertNotIn(secret, ops[0].reason)
+        self.assertNotIn(secret, render_plan(plan))
+        self.applier.apply(plan)
+        self.assertEqual(self.mcp_file.read_bytes(), before)
+
+    def _remote_with_header(self, value):
+        entry = {"serverUrl": "https://demo.example.test/mcp", "headers": {"X-Demo": value}}
+        self.write(self.mcp_file, json.dumps({"mcpServers": {"demo-remote": entry}}) + "\n")
+
+    def test_header_reference_is_classified_alike_by_import_and_plan(self):
+        url = "https://demo.example.test/mcp"
+        for value, literal in (
+            ("${DEMO_TOKEN}", False),
+            ("Bearer ${DEMO_TOKEN}", False),
+            ("OAuth2.0 ${DEMO_TOKEN}", False),
+            ("1Bearer ${DEMO_TOKEN}", True),
+            ("Bearer literal-value", True),
+            ("Bearer ${DEMO_TOKEN}\n", True),
+        ):
+            with self.subTest(value=value):
+                self._remote_with_header(value)
+                notes = self.adapter.import_notes(self.env)
+                self.assertEqual(len(notes), 1 if literal else 0)
+                ops = self.plan_mcp({"demo-remote": McpServer("demo-remote", url=url)}, owned=())
+                self.assertEqual([type(o) for o in ops], [Conflict] if literal else [])
+
+    def test_a_number_is_not_taken_for_a_boolean_switch(self):
+        self.sync_mcp({"demo": McpServer("demo", command="echo")})
+        doc = json.loads(self.mcp_file.read_text("utf-8"))
+        doc["mcpServers"]["demo"]["disabled"] = 1
+        self.write(self.mcp_file, json.dumps(doc) + "\n")
+        desired = {"demo": McpServer("demo", command="echo", enabled=False)}
+        self.sync_mcp(desired)
+        self.assertIs(json.loads(self.mcp_file.read_text("utf-8"))["mcpServers"]["demo"]["disabled"], True)
+        self.assertEqual(self.plan_mcp(desired), [])
+
+    def test_credential_shaped_header_and_variable_names_are_literal(self):
+        key = "ghp_" + "a9" * 12
+        url = "https://demo.example.test/mcp"
+        for headers in ({key: "${TOKEN}"}, {"X-Demo": "${" + key + "}"}, {"X-Demo": key + " ${T}"}):
+            with self.subTest(headers=sorted(headers)):
+                entry = {"serverUrl": url, "headers": headers}
+                self.write(self.mcp_file, json.dumps({"mcpServers": {"demo": entry}}))
+                self.assertEqual([n.field for n in self.adapter.import_notes(self.env)], ["header"])
+                ops = self.plan_mcp({"demo": McpServer("demo", url=url)}, owned=())
+                self.assertEqual([type(o) for o in ops], [Conflict])
+
+    def test_a_server_written_twice_fails_the_edit_and_keeps_the_file(self):
+        from one_setup_all_agents.engine.errors import ApplyError
+
+        self.sync_mcp({"demo": McpServer("demo", command="first")})
+        text = (
+            '{"mcpServers": {"demo": {"command": "first", "args": []}, '
+            '"demo": {"command": "second", "args": []}}}\n'
+        )
+        self.write(self.mcp_file, text)
+        before = self.mcp_file.read_bytes()
+        ops = self.plan_mcp({"demo": McpServer("demo", command="new-cmd")})
+        with self.assertRaises(ApplyError):
+            self.applier.apply(Plan(ops))
+        self.assertEqual(self.mcp_file.read_bytes(), before)
+
+    def test_a_number_switch_is_corrected_when_the_server_is_enabled(self):
+        self.sync_mcp({"demo": McpServer("demo", command="echo")})
+        doc = json.loads(self.mcp_file.read_text("utf-8"))
+        doc["mcpServers"]["demo"]["disabled"] = 1
+        self.write(self.mcp_file, json.dumps(doc) + "\n")
+        desired = {"demo": McpServer("demo", command="echo")}
+        self.assertEqual(len(self.plan_mcp(desired)), 1)
+        self.sync_mcp(desired)
+        self.assertNotIn("disabled", json.loads(self.mcp_file.read_text("utf-8"))["mcpServers"]["demo"])
+        self.assertEqual(self.plan_mcp(desired), [])
+
+    def test_bad_args_are_never_taken_for_an_empty_list(self):
+        for args in (False, "", 0, {}):
+            with self.subTest(args=args):
+                entry = {"command": "echo", "args": args}
+                self.write(self.mcp_file, json.dumps({"mcpServers": {"srv": entry}}))
+                ops = self.plan_mcp({"srv": McpServer("srv", command="echo")}, owned=())
+                self.assertEqual([type(o) for o in ops], [Conflict])
+
+    def test_a_bad_env_value_is_never_taken_for_an_empty_one(self):
+        for env in ([], "", 0, False):
+            with self.subTest(env=env):
+                entry = {"command": "echo", "env": env}
+                self.write(self.mcp_file, json.dumps({"mcpServers": {"srv": entry}}))
+                ops = self.plan_mcp({"srv": McpServer("srv", command="echo")}, owned=())
+                self.assertEqual([type(o) for o in ops], [Conflict])
+
+    def test_an_env_that_is_not_an_object_gets_a_note(self):
+        self.write(self.mcp_file, json.dumps({"mcpServers": {"srv": {"command": "c", "env": "x"}}}))
+        notes = self.adapter.import_notes(self.env)
+        self.assertEqual([(n.field, n.name) for n in notes], [("env", "env")])
+
+    def test_a_non_string_env_value_gets_a_note(self):
+        entry = {"command": "c", "env": {"NUMBER": 7, "MODE": "plain"}}
+        self.write(self.mcp_file, json.dumps({"mcpServers": {"srv": entry}}) + "\n")
+        notes = self.adapter.import_notes(self.env)
+        self.assertEqual([(n.server, n.field, n.name) for n in notes], [("srv", "env", "NUMBER")])
+        self.assertEqual(self.adapter.read_mcp(self.env, G)["srv"].env, (("MODE", "plain"),))
+
+    def test_literal_header_conflict_comes_before_an_unwritable_desired_server(self):
+        self._remote_with_header("Bearer literal-value")
+        desired = McpServer(
+            "demo-remote",
+            url="https://demo.example.test/mcp",
+            headers=(HeaderRef("Authorization", "DEMO_TOKEN", "Bearer"),),
+        )
+        ops = self.plan_mcp({"demo-remote": desired}, owned=())
+        self.assertEqual([type(o) for o in ops], [Conflict])
+
     def test_a_secret_literal_in_an_owned_entry_never_reaches_an_op_or_the_plan_text(self):
         from one_setup_all_agents.engine.plan import render_plan
 

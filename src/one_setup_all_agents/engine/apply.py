@@ -25,7 +25,7 @@ import hashlib
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from .._core.mask import mask_args, mask_text
+from .._core.mask import mask_args, mask_name, mask_text
 from ..model import Conflict, EditFile, Env, ItemRef, Kind, Link, Op, Plan, RunCli
 from . import backup, fsops, journal, links
 from .atomic import atomic_write, resolve_target
@@ -270,7 +270,7 @@ def apply_plan(
             ref = next(iter(op.claims + op.releases), None)
             tool = ref.tool if ref else "engine"
             kind = ref.kind if ref else Kind.MCP
-            key = ref.key if ref else mask_text(op.description)
+            key = mask_name(ref.key) if ref else mask_text(op.description)
             item = key
             new_ops.append(
                 Conflict(

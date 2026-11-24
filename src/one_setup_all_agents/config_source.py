@@ -15,9 +15,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ._core import jsonc
-from ._core.mask import env_value_looks_secret, mask_args, mask_text
+from ._core.mask import (
+    env_value_looks_secret,
+    looks_like_credential,
+    mask_args,
+    mask_name,
+    mask_text,
+)
 from .engine.plan import DesiredState
-from .model import HeaderRef, McpServer, SkillRef
+from .model import HEADER_SCHEME_PATTERN, HEADER_SCHEME_RE, HeaderRef, McpServer, SkillRef
 
 SOURCE_CONFIG_NAME = "config.toml"
 SOURCE_VERSION = 1
@@ -25,8 +31,11 @@ INSTRUCTIONS_NAME = "instructions.md"
 MCP_NAME = "mcp.jsonc"
 SKILLS_DIRNAME = "skills"
 
-_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_HEADER_VAR_RE = re.compile(r"^(?:([A-Za-z0-9_-]+)\s+)?\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
+_HEADER_VAR_RE = re.compile(
+    rf"^(?:({HEADER_SCHEME_PATTERN})\s+)?\$\{{([A-Za-z_][A-Za-z0-9_]*)\}}\Z"
+)
+_HEADER_BAD_SCHEME_RE = re.compile(r"^\S.*\s\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 _BIDI_RE = re.compile(r"[\u200E\u200F\u061C\u202A-\u202E\u2066-\u2069]")
 
 
@@ -44,10 +53,11 @@ class ToolSettings:
 
 @dataclass(frozen=True)
 class ServerEntry:
-    """An MCP server declaration with its target tool selector."""
+    """An MCP server declaration with its target tool selector and optional description."""
 
     server: McpServer
     tools: tuple[str, ...] | None = None
+    description: str | None = None
 
 
 @dataclass(frozen=True)
@@ -61,6 +71,25 @@ class SourceConfig:
     servers: Mapping[str, ServerEntry]
     skills: tuple[SkillRef, ...]
     warnings: tuple[str, ...] = ()
+
+
+def _finite(value: int | float) -> bool:
+    """`math.isfinite` that answers False for an integer too large for a float."""
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _header_value_ok(value: object) -> bool:
+    """A header value that is only a variable reference: no line break, `[scheme ]${NAME}`."""
+    if not isinstance(value, str) or "\r" in value or "\n" in value:
+        return False
+    match = _HEADER_VAR_RE.match(value.strip())
+    if match is None:
+        return False
+    scheme, var = match.group(1) or "", match.group(2)
+    return not (looks_like_credential(scheme) or looks_like_credential(var))
 
 
 def server_secret_problems(server: ServerEntry | McpServer) -> list[str]:
@@ -84,7 +113,12 @@ def server_secret_problems(server: ServerEntry | McpServer) -> list[str]:
     if srv.args and mask_args(list(srv.args)) != [str(a) for a in srv.args]:
         problems.append("arg")
 
-    # 3. env
+    # 3. env (a variable NAME that is itself a credential counts too)
+    if any(
+        not isinstance(v, str) or not _ENV_VAR_NAME_RE.match(v) or looks_like_credential(v)
+        for v in srv.env_vars or ()
+    ):
+        problems.append("env")
     env_items = srv.env.items() if isinstance(srv.env, dict) else srv.env
     if env_items:
         for ek, ev in env_items:
@@ -96,23 +130,30 @@ def server_secret_problems(server: ServerEntry | McpServer) -> list[str]:
     headers = srv.headers
     if headers:
         if isinstance(headers, dict):
-            for _hname, hval in headers.items():
-                if not isinstance(hval, str) or not _HEADER_VAR_RE.match(hval.strip()):
+            for hname, hval in headers.items():
+                if looks_like_credential(hname) or not _header_value_ok(hval):
                     problems.append("header")
                     break
         elif isinstance(headers, (list, tuple)):
             for h in headers:
                 if isinstance(h, HeaderRef):
+                    if looks_like_credential(h.name) or looks_like_credential(h.env_var):
+                        problems.append("header")
+                        break
                     if not h.env_var or not _ENV_VAR_NAME_RE.match(h.env_var):
                         problems.append("header")
                         break
+                    if h.scheme is not None and (
+                        not HEADER_SCHEME_RE.match(h.scheme) or looks_like_credential(h.scheme)
+                    ):
+                        problems.append("header")
+                        break
                 elif isinstance(h, (list, tuple)) and len(h) >= 2:
-                    hval = str(h[1])
-                    if not isinstance(hval, str) or not _HEADER_VAR_RE.match(hval.strip()):
+                    if looks_like_credential(h[0]) or not _header_value_ok(str(h[1])):
                         problems.append("header")
                         break
                 elif isinstance(h, str):
-                    if not _HEADER_VAR_RE.match(h.strip()):
+                    if not _header_value_ok(h):
                         problems.append("header")
                         break
 
@@ -150,7 +191,7 @@ def load_source_texts(
 
     for key in toml_data:
         if key not in ("version", "tools", "projects"):
-            raise SourceError(f"unknown top-level key '{mask_text(key)}' in '{SOURCE_CONFIG_NAME}'")
+            raise SourceError(f"unknown top-level key '{mask_name(key)}' in '{SOURCE_CONFIG_NAME}'")
 
     valid_ids = set(valid_tool_ids)
     tools_map: dict[str, ToolSettings] = {}
@@ -170,7 +211,7 @@ def load_source_texts(
             raise SourceError(f"settings for tool at [tools] position #{pos} must be a table")
         for skey in settings:
             if skey not in ("enabled", "skills_exclude"):
-                raise SourceError(f"unknown setting '{mask_text(skey)}' in [tools.{tool_id}]")
+                raise SourceError(f"unknown setting '{mask_name(skey)}' in [tools.{tool_id}]")
         enabled = settings.get("enabled", True)
         if not isinstance(enabled, bool):
             raise SourceError(f"'enabled' in [tools.{tool_id}] must be a boolean")
@@ -205,13 +246,15 @@ def load_source_texts(
 
         for key in mcp_data:
             if key not in ("version", "servers"):
-                raise SourceError(f"unknown top-level key '{mask_text(key)}' in '{MCP_NAME}'")
+                raise SourceError(f"unknown top-level key '{mask_name(key)}' in '{MCP_NAME}'")
 
         servers_obj = mcp_data.get("servers", {})
         if not isinstance(servers_obj, dict):
             raise SourceError(f"'servers' in '{MCP_NAME}' must be an object")
 
         for sname, sdata in servers_obj.items():
+            if looks_like_credential(sname):  # checked first: later messages name the server
+                raise SourceError(f"a server name in '{MCP_NAME}' looks like a secret; rename it")
             if not isinstance(sdata, dict):
                 raise SourceError(f"server '{sname}' must be an object")
 
@@ -241,7 +284,7 @@ def load_source_texts(
             }
             for field in sdata:
                 if field not in allowed_fields:
-                    raise SourceError(f"unknown field '{mask_text(field)}' in server '{sname}'")
+                    raise SourceError(f"unknown field '{mask_name(field)}' in server '{sname}'")
 
             has_url = "url" in sdata
             has_cmd = "command" in sdata
@@ -307,13 +350,34 @@ def load_source_texts(
                         raise SourceError(
                             f"'headers' keys and values in server '{sname}' must be strings"
                         )
-                    match = _HEADER_VAR_RE.match(hval.strip())
+                    if looks_like_credential(hname):
+                        raise SourceError(
+                            f"a header name in server '{sname}' looks like a secret; "
+                            "use a plain header name and reference the value as ${NAME}"
+                        )
+                    if "\r" in hval or "\n" in hval:
+                        raise SourceError(
+                            f"a header value in server '{sname}' must not contain a line break"
+                        )
+                    stripped = hval.strip()
+                    match = _HEADER_VAR_RE.match(stripped)
                     if not match:
+                        if _HEADER_BAD_SCHEME_RE.match(stripped):
+                            raise SourceError(
+                                f"invalid header scheme in server '{sname}': scheme must start "
+                                "with an ASCII letter and continue with letters, digits, '.', "
+                                "'_' or '-'"
+                            )
                         raise SourceError(
                             f"headers must reference an environment variable in server '{sname}'"
                         )
                     scheme = match.group(1)
                     var_name = match.group(2)
+                    if looks_like_credential(var_name) or looks_like_credential(scheme or ""):
+                        raise SourceError(
+                            f"a header in server '{sname}' references a variable whose name "
+                            "looks like a secret; use a plain variable name"
+                        )
                     headers_list.append(HeaderRef(name=hname, env_var=var_name, scheme=scheme))
 
             # env_vars
@@ -323,7 +387,11 @@ def load_source_texts(
                 if not isinstance(raw_env_vars, (list, tuple)):
                     raise SourceError(f"'env_vars' in server '{sname}' must be a list of strings")
                 for i, evar in enumerate(raw_env_vars, 1):
-                    if not isinstance(evar, str) or not _ENV_VAR_NAME_RE.match(evar):
+                    if (
+                        not isinstance(evar, str)
+                        or not _ENV_VAR_NAME_RE.match(evar)
+                        or looks_like_credential(evar)
+                    ):
                         raise SourceError(
                             f"env_vars entry #{i} in server '{sname}' "
                             "is not a valid environment variable name"
@@ -361,7 +429,7 @@ def load_source_texts(
                 if (
                     isinstance(v, bool)
                     or not isinstance(v, (int, float))
-                    or not math.isfinite(v)
+                    or not _finite(v)
                     or v <= 0
                 ):
                     raise SourceError(
@@ -373,6 +441,14 @@ def load_source_texts(
             enabled = sdata.get("enabled", True)
             if not isinstance(enabled, bool):
                 raise SourceError(f"'enabled' in server '{sname}' must be a boolean")
+
+            # description
+            description: str | None = None
+            if "description" in sdata:
+                raw_desc = sdata["description"]
+                if raw_desc is not None and not isinstance(raw_desc, str):
+                    raise SourceError(f"'description' in server '{sname}' must be a string")
+                description = raw_desc
 
             try:
                 temp_server = McpServer(
@@ -424,7 +500,9 @@ def load_source_texts(
             except ValueError as exc:
                 raise SourceError(f"server '{sname}' is invalid") from exc
 
-            servers_map[sname] = ServerEntry(server=server, tools=tools_tuple)
+            servers_map[sname] = ServerEntry(
+                server=server, tools=tools_tuple, description=description
+            )
 
     warnings: list[str] = []
 
@@ -643,6 +721,9 @@ def render_mcp_source(
         entry = entries[sname]
         srv = entry.server
         obj: dict[str, object] = {}
+
+        if entry.description is not None:
+            obj["description"] = entry.description
 
         if srv.url is not None:
             obj["url"] = srv.url

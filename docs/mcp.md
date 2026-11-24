@@ -38,11 +38,11 @@ Every entry under `servers` may use only the following fields:
 | `env` | object (`string -> string`) | `stdio` only | Non-secret literal environment variables to set for the server. |
 | `env_vars` | list of strings | `stdio` only | Names of environment variables to pass through from the host environment under the same name. Each entry must match `^[A-Za-z_][A-Za-z0-9_]*$`. |
 | `headers` | object (`string -> string`) | `http` only | HTTP headers whose values reference an environment variable: `${VAR_NAME}` or `<Scheme> ${VAR_NAME}` (for example `Bearer ${EXAMPLE_TOKEN}`). |
-| `startup_timeout_sec` | positive finite number | both | Server startup timeout in seconds (booleans are rejected). Prefer whole seconds: a fractional value is written to Codex as is, but reading a Codex config back (for example during `init`) keeps whole seconds only. |
+| `startup_timeout_sec` | positive finite number | both | Server startup timeout in seconds (booleans are rejected). Prefer whole seconds: a fractional value is written to Codex as is and rounded to positive integer milliseconds in OpenCode (v2 layout), but reading either config back (for example during `init`) keeps whole seconds only. |
 | `auth` | `"oauth"`, `"none"`, or `null` | both | Documentation-only marker. Not written to any tool. |
 | `enabled` | boolean | both | Whether the server is enabled (default `true`). |
 | `tools` | list of strings | both | Target adapter IDs (`"opencode"`, `"claude"`, `"codex"`, `"agy"`). When omitted, the server targets every enabled tool. |
-| `description` | optional note | both | Accepted by the loader as a human-readable note, but not stored on the internal server model, not preserved by `init` rendering, and never written to tools. String values are still checked against legacy `{{VAR}}` syntax. |
+| `description` | string or `null` | both | Optional human-readable note kept on the source-side `ServerEntry` and preserved through source round trips (`load_source` -> `render_mcp_source` -> `load_source`). Not stored on the tool-neutral `McpServer` and never written to any tool. Checked against legacy `{{VAR}}` syntax. |
 
 ### Transport rules (`stdio` vs `http`)
 
@@ -96,8 +96,8 @@ Transport is inferred from whether `command` or `url` is present (there is no `t
 - Invalid field types (for example non-list `args`, non-boolean `enabled`, non-positive/non-finite or boolean `startup_timeout_sec`, invalid `auth`, or an unknown tool ID in `tools`).
 - Invalid variable names in `env_vars` or `headers` (names must start with an ASCII letter or `_`, followed by ASCII letters, digits, or `_`).
 - A variable name listed in both `env` and `env_vars` on the same server.
-- A literal value in `headers` (every header value must match `${VAR}` or `<Scheme> ${VAR}`).
-- A value that looks like a secret in `command`, `url`, `cwd`, `args`, or `env`. The detector (`_core/mask.py`) flags known token prefixes (such as `ghp_`, `github_pat_`, `sk-`, `xox...`, `AIza...`, JWTs), `Bearer`/`Basic` followed by a literal, URL userinfo passwords, secret `key=value` assignments, values after secret-looking flags (such as `--token`), opaque 32+ character strings with both letters and digits, and any non-empty `env` literal whose key name suggests a secret (`token`, `secret`, `password`/`passwd`, `api_key`/`apikey`, `credential`, `private_key`, `access_key`).
+- A literal value or invalid scheme in `headers` (every header value must match `${VAR}` or `<Scheme> ${VAR}`, where `<Scheme>` matches `^[A-Za-z][A-Za-z0-9._-]*$`).
+- A value that looks like a secret in `command`, `url`, `cwd`, `args`, or `env`. The detector (`_core/mask.py`) flags known token prefixes (such as `ghp_`, `github_pat_`, `sk-`, `xox...`, `AIza...`, JWTs), `Bearer`/`Basic` followed by a literal, URL userinfo passwords, secret `key=value` assignments, values after secret-looking flags (such as `--token`), opaque 32+ character strings with both letters and digits, the fallback of a reference (`${NAME:-value}`, which may hold a literal secret; only a plain `${NAME}` counts as a reference), and any non-empty `env` literal whose key name suggests a secret (`token`, `secret`, `password`/`passwd`, `api_key`/`apikey`, `credential`, `private_key`, `access_key`).
 
 ## Secrets and Variable References
 
@@ -119,9 +119,9 @@ When `all-agents init` reads your existing tool configs:
 
 - Adapter readers never copy secret-looking `env` literals or literal HTTP headers into the neutral model. Instead, `init` prints a warning naming the field (never the value), adds a `// Note:` comment above that server in `mcp.jsonc`, and leaves that server **unowned** (not adopted) for that tool.
 - `all-agents` never edits or removes an unowned entry on `all-agents sync`:
-  - If the unowned entry already matches the fields the adapter compares, `sync` plans no change and no conflict, leaving the entry as is (so the literal credential stays in that tool's config until you move it to an environment variable yourself).
+  - If the unowned entry already matches the fields the adapter compares, `sync` plans no change and no conflict, leaving the entry as is.
   - If a change would be needed on the compared fields, `sync` reports a `Conflict` and leaves the entry untouched.
-  - Because secret-looking `env` entries are dropped from `mcp.jsonc` while `env`/`environment` is always compared, a dropped `env` secret triggers a `Conflict` in all four tools. For a dropped literal HTTP header (when `mcp.jsonc` has no `headers`), Claude Code always compares `headers` and reports a `Conflict`, whereas OpenCode (which compares `headers` only when present in the source), Codex (which ignores literal `http_headers` during comparison), and Antigravity (which leaves `headers` out of the server it reads and compares, and looks at them only to write the import note) leave the entry alone without a conflict, as long as the other compared fields match.
+  - Because secret-looking `env` entries are dropped from `mcp.jsonc` while `env`/`environment` is always compared, a dropped `env` secret triggers a `Conflict` in all four tools. Likewise, when an unowned tool entry carries literal HTTP headers that `mcp.jsonc` does not carry (for Antigravity, a header whose value is a `${VAR}` or `<scheme> ${VAR}` reference is not literal), all four tools report a `Conflict` and leave the entry untouched without ever exposing the literal value in the conflict reason, plan, or journal. (For servers already **owned** by `all-agents`, Codex `http_headers` and Antigravity `headers` stay outside the owned keys so user-added headers still survive updates.)
 - If a secret-looking literal appears inside `command`, `url`, `cwd`, or `args`, `init` skips importing that server altogether and prints a warning naming the field.
 
 ## Per-Tool Translation
@@ -164,7 +164,7 @@ Given these two servers in `mcp.jsonc`:
 | `headers` (`Authorization: Bearer ${VAR}`) | `"headers": {"Authorization": "Bearer ${VAR}"}` | `"headers": {"Authorization": "Bearer {env:VAR}"}` | `bearer_token_env_var = "VAR"` | Server not written (`Unsupported`) |
 | `headers` (no scheme, e.g. `X-API-Key: ${VAR}`) | `"headers": {"X-API-Key": "${VAR}"}` | `"headers": {"X-API-Key": "{env:VAR}"}` | `[mcp_servers.<name>.env_http_headers]` | Server not written (`Unsupported`) |
 | `cwd` | Not stored (`Unsupported`) | `"cwd": "..."` | `cwd = "..."` | `"cwd": "..."` |
-| `startup_timeout_sec` | Not stored (`Unsupported`) | Not stored (`Unsupported`) | `startup_timeout_sec = 30` | Not stored (`Unsupported`) |
+| `startup_timeout_sec` | Not stored (`Unsupported`) | `"timeout": {"startup": 30000}` (v2, ms; v1 `Unsupported`) | `startup_timeout_sec = 30` | Not stored (`Unsupported`) |
 | `enabled: false` | Not written; removes owned entry (`Unsupported`) | `"disabled": true` (v2) / `"enabled": false` (v1) | `enabled = false` | `"disabled": true` |
 | `auth` | Documentation only (not written) | Documentation only (not written) | Documentation only (not written) | Documentation only (not written) |
 | Windows `npx`/`npm`/`pnpm`/`yarn` | Plain name (`npx`) | `.cmd` suffix (`npx.cmd`) | `.cmd` suffix (`npx.cmd`) | `.cmd` suffix (`npx.cmd`) |
@@ -219,7 +219,10 @@ Edited as text inside `~/.config/opencode/opencode.jsonc` (or `$XDG_CONFIG_HOME/
           "LOG_LEVEL": "info",
           "EXAMPLE_API_KEY": "{env:EXAMPLE_API_KEY}"
         },
-        "cwd": "/path/to/workspace"
+        "cwd": "/path/to/workspace",
+        "timeout": {
+          "startup": 30000
+        }
       },
       "demo-remote": {
         "type": "remote",
@@ -234,7 +237,7 @@ Edited as text inside `~/.config/opencode/opencode.jsonc` (or `$XDG_CONFIG_HOME/
 ```
 
 - On Windows, `npx`, `npm`, `pnpm`, and `yarn` are written with a `.cmd` suffix (`"npx.cmd"`).
-- `startup_timeout_sec` is omitted and reported as `Unsupported` (`demo-local: startup_timeout_sec not stored`).
+- `startup_timeout_sec` is written as positive integer milliseconds under `"timeout": {"startup": <ms>}` in the v2 layout (`mcp.servers`); a change edits only `startup`, preserving comments and any sibling `catalog` or `execution` keys, and a value too large to store in milliseconds is omitted and reported as `Unsupported`; if `startup_timeout_sec` is omitted in `mcp.jsonc`, any `timeout` you added by hand to an owned OpenCode server is kept. In the older v1 layout (`mcp.<name>`), `startup_timeout_sec` is omitted and reported as `Unsupported`.
 
 ### Codex (`codex`)
 
@@ -324,9 +327,9 @@ See the individual reports in [`docs/verification/`](verification/) and the [Sup
   - A literal `env` value containing `${` is not written (`Unsupported`), because Claude Code would expand it.
   - Requires the `claude` CLI on `PATH`, in a known install folder (such as `~/.claude/local`), or via `ALL_AGENTS_CLAUDE_BIN`; if missing, any MCP change becomes a `Conflict`.
   - On Windows, if the CLI is a `.cmd` or `.bat` shim and any argument contains `% & | < > ^ !`, MCP changes are refused as a `Conflict` (use `claude.exe` or set `ALL_AGENTS_CLAUDE_BIN`).
-  - If an owned entry in `.claude.json` holds a secret-looking literal, replacing or removing it is refused as a `Conflict` so the value never reaches a command line or journal.
+  - If an owned entry in `.claude.json` holds a secret-looking literal (including the fallback in `${NAME:-fallback}`) or any literal HTTP header, replacing or removing it is refused as a `Conflict` so the value never reaches a command line or journal.
 - **OpenCode (`opencode`):**
-  - `startup_timeout_sec` is not stored (`Unsupported`).
+  - `startup_timeout_sec` is stored as positive integer milliseconds under `timeout.startup` in the v2 layout (`mcp.servers`), and is not stored (`Unsupported`) in the legacy v1 layout (`mcp.<name>`).
 - **Codex (`codex`):**
   - Headers can only be `Authorization: Bearer ${VAR}` or a raw `${VAR}` with no scheme; any other scheme causes the server to be skipped (`Unsupported`), as do duplicate header names differing only in case.
   - Server names must match `^[A-Za-z0-9_:@/.-]+$`; other names are not written (`Unsupported`).
@@ -338,7 +341,7 @@ See the individual reports in [`docs/verification/`](verification/) and the [Sup
   - `startup_timeout_sec` is not stored (`Unsupported`).
 - **All tools:**
   - `auth` is documentation-only and is not written to any tool.
-  - Header schemes have a regex mismatch between the source loader and the adapters: the source loader (`config_source.py`) accepts `[A-Za-z0-9_-]+`, so a scheme containing `.` is refused by the loader (`SourceError`) while a scheme that does not start with a letter (a digit, `_` or `-`) passes; Claude Code and OpenCode require `^[A-Za-z][A-Za-z0-9._-]*$`, so such a scheme is reported as `Unsupported` by those adapters. (Codex accepts only `Bearer` on `Authorization`.)
+  - Header schemes share one rule across the source loader and adapters (`^[A-Za-z][A-Za-z0-9._-]*$`: starts with an ASCII letter and continues with ASCII letters, digits, `.`, `_`, or `-`). Invalid schemes are refused by the loader with `SourceError`. (Codex accepts only `Bearer` on `Authorization`.)
 
 ### How `Unsupported` and `Conflict` are reported
 
@@ -348,7 +351,7 @@ See the individual reports in [`docs/verification/`](verification/) and the [Sup
   - In `all-agents sync --dry-run` and `all-agents sync`, gaps are counted in the summary line (`Plan: ... N unsupported`) and listed under `Not supported by the tool (shown so the gap is visible):`. `Unsupported` entries do **not** cause `sync` to fail (exit code stays `0` when there are no conflicts or errors).
   - In `all-agents status`, once a tool's `mcp` kind has no reader errors, conflicts, or pending changes, it shows `mcp: unsupported (reasons: ...)`. An `Unsupported` entry is a permanent capability gap rather than drift, so it does not change the tool's overall status: a tool whose other kinds (instructions, skills) are in sync still reports `in sync`, and `status` exits `0` when no tool shows a conflict, a pending change or an unreadable config.
 - **`Conflict` (something in the way):**
-  - Reported when a server with the same name already exists, was not created or adopted by `all-agents`, and differs from what would be written (an identical unowned entry is left alone with no conflict), when a tool config file cannot be parsed, or when the `claude` CLI is missing for a pending Claude Code MCP change.
+  - Reported when a server with the same name already exists, was not created or adopted by `all-agents`, and differs from what would be written (an identical unowned entry is left alone with no conflict, unless it carries literal HTTP headers, which is always a conflict), when a tool config file cannot be parsed, or when the `claude` CLI is missing for a pending Claude Code MCP change.
   - Conflicting items are left untouched. They appear under `Conflicts (left alone, not changed):` in `sync` (exit code `3`) and as `mcp: conflict (...)` in `status` (exit code `2`). A tool config that cannot be read or parsed is a `Conflict` in the `sync` plan, but `status` checks the reader first and shows it as `mcp: unreadable (...)` (also exit code `2`).
 
 ## Walkthrough: From OpenCode to All Tools

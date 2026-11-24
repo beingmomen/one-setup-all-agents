@@ -200,12 +200,15 @@ class ToolAdapter(ABC):
         """What `read_instructions` returns after `desired` was written. Default: unchanged."""
         return text
 
-    def normalize_mcp(self, servers: Mapping[str, McpServer]) -> dict[str, McpServer]:
+    def normalize_mcp(
+        self, servers: Mapping[str, McpServer], env: Env | None = None
+    ) -> dict[str, McpServer]:
         """What `read_mcp` returns for these servers after they were written.
 
         Default: unchanged. Override it for exactly the fields this tool cannot store (for
         example reset `startup_timeout_sec` to None). Anything the override does not list must
-        survive a round trip.
+        survive a round trip. `env`, when given, lets a tool whose format depends on its
+        existing global config file (for example an older layout) answer for that file.
         """
         return dict(servers)
 

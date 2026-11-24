@@ -12,7 +12,7 @@ import re
 BEGIN = "# >>> one-setup-all-agents >>>"
 END = "# <<< one-setup-all-agents <<<"
 _HEADER = re.compile(r"^\s*(\[\[?)\s*(.+?)\s*\]\]?\s*(#.*)?$")
-_BARE = re.compile(r"^[A-Za-z0-9_-]+$")
+_BARE = re.compile(r"^[A-Za-z0-9_-]+\Z")
 
 
 class TomlEditError(Exception):

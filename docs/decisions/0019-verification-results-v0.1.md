@@ -2,6 +2,8 @@
 
 Status: Proposed
 
+Superseded in part by [0021](0021-mcp-source-and-adapter-alignment.md) (OpenCode startup timeout note: the per-server key is `timeout.startup`, in milliseconds; `CLAUDE_CONFIG_DIR`: V02 verified the relocation of `.claude.json` only, so the relocation of `CLAUDE.md` and skills stays unverified).
+
 This ADR records the empirical verification results obtained during Phase 6 (M06) trial against live tool binaries across Windows, Linux (WSL), and macOS CI runners. It settles or formally leaves unverified the open points in ADRs 0007, 0011, 0012, 0013, and 0014 without modifying the text of those accepted ADRs.
 
 ## Context

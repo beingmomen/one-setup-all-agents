@@ -102,8 +102,9 @@ from pathlib import Path
 from typing import ClassVar
 
 from .._core import jsonc, jsonc_edit
-from .._core.mask import env_value_looks_secret
+from .._core.mask import env_value_looks_secret, looks_like_credential, mask_name
 from ..model import (
+    HEADER_SCHEME_PATTERN,
     INSTRUCTIONS_KEY,
     Conflict,
     Detection,
@@ -346,19 +347,61 @@ def _owned_view(entry: Mapping) -> dict:
     """
     return {
         "command": _canon_command(entry.get("command")),
-        "args": entry.get("args") or [],
+        "args": [] if entry.get("args") is None else entry["args"],  # a bad value stays
         "url": entry.get("serverUrl") or entry.get("url"),
-        "env": entry.get("env") or {},
+        "env": {} if entry.get("env") is None else entry["env"],  # a bad value stays visible
         "cwd": entry.get("cwd"),
-        "disabled": entry.get("disabled") is True,
+        "disabled": _switch(entry.get("disabled")),
     }
+
+
+def _switch(value: object) -> object:
+    """A `disabled` value as compared: missing is False; a non-boolean stays distinct from both
+    booleans (Python's `1 == True`), so it is corrected rather than taken as in sync."""
+    if value is None:
+        return False
+    return value if isinstance(value, bool) else ("not a boolean", value)
+
+
+#: A header value that names a variable (`${VAR}` or `<scheme> ${VAR}`). agy does not expand
+#: it, but it holds no secret, so `init` and `plan_mcp` both treat it as not literal.
+_HEADER_REF_RE = re.compile(
+    rf"\A(?:(?P<scheme>{HEADER_SCHEME_PATTERN}) )?\$\{{(?P<var>[A-Za-z_][A-Za-z0-9_]*)\}}\Z"
+)
+
+
+def _is_header_ref(value: object) -> bool:
+    if not isinstance(value, str) or "\r" in value or "\n" in value:
+        return False  # a line break makes it literal, as in Claude Code and OpenCode
+    match = _HEADER_REF_RE.match(value.strip())
+    if match is None:
+        return False
+    # a scheme or variable name that is itself a credential makes it literal
+    return not (looks_like_credential(match["scheme"] or "") or looks_like_credential(match["var"]))
+
+
+def _has_literal_headers(entry: Mapping) -> bool:
+    """Whether the entry holds a header value that is not a variable reference."""
+    headers = entry.get("headers")
+    if headers is None:
+        return False
+    if not isinstance(headers, Mapping):
+        return True  # not an object: never read, so nothing of it is in the source
+    return any(not _is_header_ref(v) or looks_like_credential(k) for k, v in headers.items())
+
+
+def _differs(old: object, new: object) -> bool:
+    """Inequality that does not take `1`/`0` for `True`/`False` (Python's `1 == True`)."""
+    if isinstance(old, bool) is not isinstance(new, bool):
+        return True
+    return _canon_command(old) != _canon_command(new)
 
 
 def _entry_diff(old: Mapping, fresh: Mapping) -> tuple[tuple, dict, tuple]:
     """Key-level difference that turns `old` into `fresh`, touching only keys we own."""
     removes = tuple(sorted(k for k in _OWNED_KEYS if k in old and k not in fresh))
     replaces = {
-        k: v for k, v in fresh.items() if k in old and _canon_command(old[k]) != _canon_command(v)
+        k: v for k, v in fresh.items() if k in old and _differs(old[k], v)
     }
     adds = tuple((k, v, None) for k, v in fresh.items() if k not in old)
     return removes, replaces, adds
@@ -405,10 +448,24 @@ def _apply_mcp_edit(current: bytes | None, spec: _McpEdit) -> bytes:
     node = jsonc.loads(text)["mcpServers"]
     for name, entry in (*spec.adds, *spec.replace_whole):
         if node.get(name) != entry:
-            raise ValueError(f"the edited MCP config does not hold the entry {name!r}")
+            raise ValueError(f"the edited MCP config does not hold the entry {mask_name(name)!r}")
     for name in spec.removes:
         if name in node:
-            raise ValueError(f"the edited MCP config still holds the entry {name!r}")
+            raise ValueError(f"the edited MCP config still holds the entry {mask_name(name)!r}")
+    # a key written twice in the user's file is edited at its first copy, but readers use the
+    # last one: check what a reader now sees
+    for name, removes, replaces, adds in spec.updates:
+        entry = node.get(name)
+        wanted = {**replaces, **{k: v for k, v, _ in adds}}
+        if (
+            not isinstance(entry, dict)
+            or any(k in entry for k in removes)
+            or any(k not in entry or _differs(entry[k], v) for k, v in wanted.items())
+        ):
+            raise ValueError(
+                f"the edited MCP config does not hold the planned entry {mask_name(name)!r} "
+                "(is a key written twice in it?)"
+            )
     return encode_text(text, bom, crlf)
 
 
@@ -647,35 +704,27 @@ class AntigravityAdapter(ToolAdapter):
         except ConfigUnreadable:
             return []
         notes: list[ImportNote] = []
-        _header_var_re = re.compile(r"^(?:[A-Za-z]+ )?\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
         for name, entry in sorted(config.members.items()):
             if not isinstance(entry, Mapping):
                 continue
             raw_headers = entry.get("headers")
+            if raw_headers is not None and not isinstance(raw_headers, Mapping):
+                notes.append(ImportNote(tool=self.id, server=name, field="header", name="headers"))
             if isinstance(raw_headers, Mapping):
                 for key, value in sorted(raw_headers.items()):
-                    if isinstance(value, str):
-                        if _header_var_re.match(value.strip()):
-                            continue
+                    if not _is_header_ref(value) or looks_like_credential(key):
                         notes.append(
-                            ImportNote(
-                                tool=self.id,
-                                server=name,
-                                field="header",
-                                name=str(key),
-                            )
+                            ImportNote(tool=self.id, server=name, field="header", name=str(key))
                         )
             environment = entry.get("env")
+            if environment is not None and not isinstance(environment, Mapping):
+                notes.append(ImportNote(tool=self.id, server=name, field="env", name="env"))
             if isinstance(environment, Mapping):
                 for key, value in sorted(environment.items()):
-                    if isinstance(value, str) and env_value_looks_secret(str(key), value):
+                    # what `decode_server` drops (a non-string value too) gets a note
+                    if not isinstance(value, str) or env_value_looks_secret(str(key), value):
                         notes.append(
-                            ImportNote(
-                                tool=self.id,
-                                server=name,
-                                field="env",
-                                name=str(key),
-                            )
+                            ImportNote(tool=self.id, server=name, field="env", name=str(key))
                         )
         return notes
 
@@ -737,6 +786,14 @@ class AntigravityAdapter(ToolAdapter):
         whole: list[tuple[str, dict]] = []
         claimed: list[str] = []
         for name, server in desired.items():
+            old = config.members.get(name)
+            if name not in owned and isinstance(old, dict) and _has_literal_headers(old):
+                reason = (
+                    "an MCP server with this name exists with literal headers and was not "
+                    "created by all-agents; left alone"
+                )
+                ops.append(Conflict(self.id, Kind.MCP, name, reason, path))
+                continue
             fatal = _fatal(server)
             if fatal:
                 gaps.append(f"{name}: not written, {fatal}")
@@ -754,7 +811,6 @@ class AntigravityAdapter(ToolAdapter):
                 adds.append((name, fresh))
                 claimed.append(name)
                 continue
-            old = config.members[name]
             same = isinstance(old, dict) and _owned_view(old) == _owned_view(fresh)
             if same:
                 continue  # already as wanted (an identical entry of the user's is left alone too)
@@ -833,7 +889,7 @@ class AntigravityAdapter(ToolAdapter):
             if problem is None and _folder_name(str(skill.path)) != name:
                 problem = (
                     "the manifest names a skill by its folder path, so the folder name must be "
-                    f"the skill name ({_folder_name(str(skill.path))!r} is not {name!r})"
+                    f"the skill name ({_folder_name(str(skill.path))!r} is not {mask_name(name)!r})"
                 )
             if problem is None and not Path(skill.path).is_absolute():
                 problem = "the source skill folder path is not absolute"
@@ -903,7 +959,9 @@ class AntigravityAdapter(ToolAdapter):
 
     # -- normalization -------------------------------------------------------------------------
 
-    def normalize_mcp(self, servers: Mapping[str, McpServer]) -> dict[str, McpServer]:
+    def normalize_mcp(
+        self, servers: Mapping[str, McpServer], env: Env | None = None
+    ) -> dict[str, McpServer]:
         """What `read_mcp` returns after `servers` were written (for writable servers).
 
         A server that is not written (an http server with headers) is not in the result. Lost for

@@ -39,6 +39,18 @@ class JsoncEditTests(unittest.TestCase):
         )  # parses even without the tolerant reader
         self.assertNotIn("}, }", out)
 
+    def test_a_block_comment_spanning_lines_after_a_member_stays_whole(self):
+        text = '{\n  "url": "https://x", /* note\n     more */\n  "headers": {"A": "{env:B}"}\n}\n'
+        out = jsonc_edit.edit_object(text, [], removes=["headers"])
+        self.assertIn("/* note\n     more */", out)
+        self.assertEqual(jsonc.loads(out), {"url": "https://x"})
+
+    def test_a_block_comment_ending_on_the_removed_member_line_stays_whole(self):
+        text = '{\n  "url": "https://x", /* note\n     more */ "headers": {"A": "{env:B}"}\n}\n'
+        out = jsonc_edit.edit_object(text, [], removes=["headers"])
+        self.assertIn("/* note\n     more */", out)
+        self.assertEqual(jsonc.loads(out), {"url": "https://x"})
+
     def test_replace_keeps_comments_above(self):
         out = jsonc_edit.edit_object(self.DOC, ["mcp", "servers"], replaces={"one": {"y": [1, 2]}})
         self.assertIn("// first", out)
